@@ -37,23 +37,6 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		return provider.VideoResult{}, err
 	}
 	defer lease.Release()
-	parentID := ""
-	references := make([]string, 0, len(request.ReferenceURLs))
-	for _, rawReference := range request.ReferenceURLs {
-		reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
-		if referenceErr != nil {
-			return provider.VideoResult{}, referenceErr
-		}
-		references = append(references, reference)
-	}
-	if len(references) > 0 {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0], "")
-	} else {
-		parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt)
-	}
-	if err != nil {
-		return provider.VideoResult{}, err
-	}
 	segments := videoSegments(request.Duration)
 	if len(segments) == 0 {
 		return provider.VideoResult{}, fmt.Errorf("duration 必须在 1 到 15 秒之间")
@@ -63,18 +46,60 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if resolution == "" {
 		resolution = "720p"
 	}
-	payload := videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references)
+	var payload map[string]any
+	if request.Operation == "extension" {
+		// 拓展 grok 已生成的视频:extendPostId=originalPostId=parentPostId=源 videoPostId,
+		// 不上传参考图、不建 media post(与抓包一致)。
+		if strings.TrimSpace(request.ExtendPostID) == "" {
+			return provider.VideoResult{}, fmt.Errorf("视频拓展缺少来源 postId")
+		}
+		videoLength := request.VideoLength
+		if videoLength <= 0 {
+			videoLength = segments[0]
+		}
+		payload = videoExtensionPayload(request.Prompt, request.ExtendPostID, ratio, resolution, videoLength, request.VideoExtensionStartTime)
+	} else {
+		parentID := ""
+		references := make([]string, 0, len(request.ReferenceURLs))
+		for _, rawReference := range request.ReferenceURLs {
+			reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
+			if referenceErr != nil {
+				return provider.VideoResult{}, referenceErr
+			}
+			references = append(references, reference)
+		}
+		if len(references) > 0 {
+			parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0], "")
+		} else {
+			parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt)
+		}
+		if err != nil {
+			return provider.VideoResult{}, err
+		}
+		payload = videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references)
+	}
 	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
-	result, _, parseErr := parseVideoStream(response, request.Progress)
+	result, postID, parseErr := parseVideoStream(response, request.Progress)
 	_ = response.Body.Close()
 	if parseErr != nil {
 		return provider.VideoResult{}, parseErr
 	}
 	if result.URL == "" {
 		return provider.VideoResult{}, fmt.Errorf("视频生成完成但没有返回内容 URL")
+	}
+	result.PostID = postID
+	// Goal A:grok 返回的是需 SSO Cookie 才能访问的私有 CDN 地址(assets.grok.com),
+	// 直接返回会让下游 403。用同一出口下载视频并重服为本地公开地址;下载失败则降级
+	// 保留裸 URL(仍留下 PostID,便于续拓与排查)。
+	if a.assets != nil {
+		if assetID, downloadErr := a.downloadVideoToStore(ctx, request.Credential, result.URL); downloadErr == nil {
+			result.URL = a.assets.PublicVideoURL(assetID)
+		} else if a.logger != nil {
+			a.logger.Warn("video_reserve_failed", "error", downloadErr, "upstream_url", result.URL)
+		}
 	}
 	return result, nil
 }
@@ -214,6 +239,31 @@ func videoSegments(seconds int) []int {
 		return nil
 	}
 	return []int{seconds}
+}
+
+// videoExtensionPayload 构造"拓展 grok 已生成视频"的 conversations/new 载荷。
+// 按抓包:extendPostId=originalPostId=parentPostId=源 videoPostId,mode=custom,
+// videoExtensionStartTime 为起始帧秒数,不带 fileAttachments/rootPostId(grok 自行追溯根)。
+func videoExtensionPayload(prompt, extendPostID, ratio, resolution string, videoLength int, startTime float64) map[string]any {
+	config := map[string]any{
+		"isVideoExtension":        true,
+		"isVideoEdit":             false,
+		"videoExtensionStartTime": startTime,
+		"extendPostId":            extendPostID,
+		"originalPostId":          extendPostID,
+		"parentPostId":            extendPostID,
+		"stitchWithExtendPostId":  true,
+		"originalPrompt":          prompt,
+		"originalRefType":         "ORIGINAL_REF_TYPE_VIDEO_EXTENSION",
+		"mode":                    "custom",
+		"aspectRatio":             ratio,
+		"videoLength":             videoLength,
+		"resolutionName":          resolution,
+	}
+	return map[string]any{
+		"temporary": true, "modelName": "imagine-video-gen", "message": prompt + " --mode=custom", "enableSideBySide": true,
+		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
+	}
 }
 
 func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []string) map[string]any {

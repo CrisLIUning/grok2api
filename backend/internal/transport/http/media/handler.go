@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	mediaapp "github.com/chenyme/grok2api/backend/internal/application/media"
 	"github.com/chenyme/grok2api/backend/internal/repository"
@@ -19,10 +20,12 @@ type Handler struct {
 
 func NewHandler(service *mediaapp.Service) *Handler { return &Handler{service: service} }
 
-// RegisterPublic 注册使用不可猜测资源 ID 的公开图片读取端点。
+// RegisterPublic 注册使用不可猜测资源 ID 的公开图片/视频读取端点。
 func (h *Handler) RegisterPublic(router *gin.Engine) {
 	router.GET("/v1/media/images/:assetId", h.getImage)
 	router.HEAD("/v1/media/images/:assetId", h.getImage)
+	router.GET("/v1/media/videos/:assetId", h.getVideo)
+	router.HEAD("/v1/media/videos/:assetId", h.getVideo)
 }
 
 // RegisterAdmin 注册管理端媒体列表和统计端点。
@@ -61,6 +64,24 @@ func (h *Handler) getImage(c *gin.Context) {
 	}
 	c.Status(http.StatusOK)
 	_, _ = io.Copy(c.Writer, body)
+}
+
+func (h *Handler) getVideo(c *gin.Context) {
+	body, err := h.service.OpenVideo(c.Request.Context(), c.Param("assetId"))
+	if errors.Is(err, mediaapp.ErrAssetNotFound) {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	defer body.Close()
+	c.Header("Content-Type", "video/mp4")
+	c.Header("Cache-Control", "public, max-age=31536000, immutable")
+	c.Header("X-Content-Type-Options", "nosniff")
+	// http.ServeContent 处理 Range/206/HEAD/If-Range;body 为 *os.File,可寻址。
+	http.ServeContent(c.Writer, c.Request, c.Param("assetId")+".mp4", time.Time{}, body)
 }
 
 func (h *Handler) listImages(c *gin.Context) {

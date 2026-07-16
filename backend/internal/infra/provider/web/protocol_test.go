@@ -696,6 +696,14 @@ func (imageAssetStoreStub) PublicImageURL(string) string {
 	return "https://api.example/v1/media/images/img_test"
 }
 
+func (imageAssetStoreStub) SaveVideo(context.Context, io.Reader) (string, error) {
+	return "vid_test", nil
+}
+
+func (imageAssetStoreStub) PublicVideoURL(string) string {
+	return "https://api.example/v1/media/videos/vid_test"
+}
+
 type imageAssetStoreRetryStub struct {
 	failures int
 	calls    int
@@ -711,6 +719,14 @@ func (s *imageAssetStoreRetryStub) SaveImage(context.Context, []byte) (mediadoma
 
 func (*imageAssetStoreRetryStub) PublicImageURL(string) string {
 	return "https://api.example/v1/media/images/img_retry"
+}
+
+func (*imageAssetStoreRetryStub) SaveVideo(context.Context, io.Reader) (string, error) {
+	return "vid_retry", nil
+}
+
+func (*imageAssetStoreRetryStub) PublicVideoURL(string) string {
+	return "https://api.example/v1/media/videos/vid_retry"
 }
 
 func TestParseVideoStreamFixture(t *testing.T) {

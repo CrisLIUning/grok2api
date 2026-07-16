@@ -241,11 +241,18 @@ type VideoRequest struct {
 	Resolution    string
 	ReferenceURLs []string
 	Progress      func(int)
+
+	// 视频编辑/拓展(grok web videoGenModelConfig)。Operation 为空表示普通文生/图生视频。
+	Operation               string  // "" | "extension" | "edit"
+	ExtendPostID            string  // 源视频的 grok videoPostId(extension/edit 用作 extendPostId/originalPostId/parentPostId)
+	VideoExtensionStartTime float64 // 从源视频第几秒(帧)拓展
+	VideoLength             int     // 目标片段长度(拓展新增秒数);为 0 时回退 Duration
 }
 
 type VideoResult struct {
 	URL         string
 	ContentType string
+	PostID      string // grok videoPostId,用于链式续拓/编辑
 }
 
 // RefreshedCredential 表示 OAuth 刷新后的旋转凭据。
@@ -319,6 +326,9 @@ type ImageEditAdapter interface {
 type ImageAssetStore interface {
 	SaveImage(ctx context.Context, data []byte) (media.Asset, error)
 	PublicImageURL(id string) string
+	// SaveVideo 流式归档重服视频,返回不可猜测的资源 ID;PublicVideoURL 返回其公开地址。
+	SaveVideo(ctx context.Context, r io.Reader) (string, error)
+	PublicVideoURL(id string) string
 }
 
 type VideoAdapter interface {

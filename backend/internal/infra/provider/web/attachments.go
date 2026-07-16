@@ -187,7 +187,9 @@ func validateRemoteImageURLWithResolver(ctx context.Context, raw string, resolve
 		return nil, fmt.Errorf("%w: URL 为空或过长", errInvalidChatImage)
 	}
 	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil || (parsed.Port() != "" && parsed.Port() != "443") {
+	// 允许任意端口的 HTTPS(自托管重服常用 8443 等非 443 端口);SSRF 由下方公网 IP 校验兜底,
+	// 端口本身不放大攻击面。仍强制 https、无 userinfo、主机非空。
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
 		return nil, fmt.Errorf("%w: URL 必须是无用户信息的 HTTPS 地址", errInvalidChatImage)
 	}
 	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
@@ -216,8 +218,12 @@ func validateRemoteImageURLWithResolver(ctx context.Context, raw string, resolve
 }
 
 func newRemoteImageTarget(original *url.URL, serverName string, address netip.Addr) *remoteImageTarget {
+	port := original.Port()
+	if port == "" {
+		port = "443"
+	}
 	fetchURL := *original
-	fetchURL.Host = net.JoinHostPort(address.String(), "443")
+	fetchURL.Host = net.JoinHostPort(address.String(), port)
 	fetchURL.Fragment = ""
 	return &remoteImageTarget{originalURL: original, fetchURL: &fetchURL, serverName: serverName, hostHeader: original.Host}
 }

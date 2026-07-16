@@ -232,6 +232,9 @@ func (s *Service) RunCleanup(ctx context.Context, onError func(error)) {
 	} else if onError != nil {
 		onError(err)
 	}
+	if _, err := s.objects.PruneVideos(ctx, maxVideoStoreBytes); err != nil && onError != nil {
+		onError(err)
+	}
 	ticker := time.NewTicker(cfg.CleanupInterval)
 	defer ticker.Stop()
 	for {
@@ -247,6 +250,10 @@ func (s *Service) RunCleanup(ctx context.Context, onError func(error)) {
 		cfg = s.runtimeConfig()
 		cleanupCtx, cancel := context.WithTimeout(ctx, min(cfg.CleanupInterval, 5*time.Minute))
 		_, err := s.Cleanup(cleanupCtx)
+		// 视频重服无数据库行,单独按容量兜底清理,避免磁盘无限增长。
+		if _, pruneErr := s.objects.PruneVideos(cleanupCtx, maxVideoStoreBytes); pruneErr != nil && onError != nil {
+			onError(pruneErr)
+		}
 		cancel()
 		if err != nil && onError != nil {
 			onError(err)

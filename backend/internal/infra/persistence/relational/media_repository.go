@@ -125,7 +125,7 @@ func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job
 	if value.ClaimToken != "" {
 		query = query.Where("claim_token = ?", value.ClaimToken)
 	}
-	result := query.Select("request_id", "client_key_name", "account_id", "account_name", "egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "provider", "model", "model_route_id", "upstream_model", "prompt", "seconds", "size", "quality", "status", "progress", "input_json", "upstream_url", "content_type", "error_code", "error_message", "lease_until", "claim_token", "updated_at", "completed_at", "usage_recorded_at").Updates(updates)
+	result := query.Select("request_id", "client_key_name", "account_id", "account_name", "egress_node_id", "egress_node_name", "egress_scope", "egress_mode", "provider", "model", "model_route_id", "upstream_model", "prompt", "seconds", "size", "quality", "status", "progress", "input_json", "upstream_url", "content_type", "post_id", "error_code", "error_message", "lease_until", "claim_token", "updated_at", "completed_at", "usage_recorded_at").Updates(updates)
 	if result.Error != nil {
 		return result.Error
 	}
@@ -264,7 +264,7 @@ func mediaJobFromDomain(value media.Job) *mediaJobModel {
 		Model:    value.Model, ModelRouteID: value.ModelRouteID, UpstreamModel: value.UpstreamModel,
 		Prompt: value.Prompt, Seconds: value.Seconds, Size: value.Size, Quality: value.Quality,
 		Status: string(value.Status), Progress: value.Progress, InputJSON: value.InputJSON, UpstreamURL: value.UpstreamURL,
-		ContentType: value.ContentType, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
+		ContentType: value.ContentType, PostID: value.PostID, ErrorCode: value.ErrorCode, ErrorMessage: value.ErrorMessage,
 		LeaseUntil: value.LeaseUntil, ClaimToken: value.ClaimToken, CreatedAt: value.CreatedAt, UpdatedAt: value.UpdatedAt,
 		CompletedAt: value.CompletedAt, UsageRecordedAt: value.UsageRecordedAt,
 	}
@@ -279,7 +279,7 @@ func mediaJobToDomain(row mediaJobModel) media.Job {
 		Model:    row.Model, ModelRouteID: row.ModelRouteID, UpstreamModel: row.UpstreamModel,
 		Prompt: row.Prompt, Seconds: row.Seconds, Size: row.Size, Quality: row.Quality,
 		Status: media.Status(row.Status), Progress: row.Progress, InputJSON: row.InputJSON, UpstreamURL: row.UpstreamURL,
-		ContentType: row.ContentType, ErrorCode: row.ErrorCode, ErrorMessage: row.ErrorMessage,
+		ContentType: row.ContentType, PostID: row.PostID, ErrorCode: row.ErrorCode, ErrorMessage: row.ErrorMessage,
 		LeaseUntil: row.LeaseUntil, ClaimToken: row.ClaimToken, CreatedAt: row.CreatedAt, UpdatedAt: row.UpdatedAt,
 		CompletedAt: row.CompletedAt, UsageRecordedAt: row.UsageRecordedAt,
 	}

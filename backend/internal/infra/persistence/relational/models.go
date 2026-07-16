@@ -369,6 +369,7 @@ type mediaJobModel struct {
 	InputJSON       string  `gorm:"type:text;not null;default:'{}';check:chk_media_jobs_input_json,length(input_json) <= 1048576"`
 	UpstreamURL     string  `gorm:"type:text;not null;default:'';check:chk_media_jobs_upstream_url,length(upstream_url) <= 8192"`
 	ContentType     string  `gorm:"size:128;not null;default:'';check:chk_media_jobs_content_type,length(content_type) <= 128"`
+	PostID          string  `gorm:"size:128;not null;default:''"`
 	ErrorCode       string  `gorm:"size:100;not null;default:'';check:chk_media_jobs_error_code,length(error_code) <= 100"`
 	ErrorMessage    string  `gorm:"size:512;not null;default:'';check:chk_media_jobs_error_message,length(error_message) <= 512"`
 	LeaseUntil      *time.Time

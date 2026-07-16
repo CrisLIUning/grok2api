@@ -65,6 +65,13 @@ type MediaAssetRepository interface {
 // MediaObjectStorage 定义媒体二进制对象的存取边界。
 type MediaObjectStorage interface {
 	SaveImage(ctx context.Context, id, mimeType string, data []byte) (string, error)
+	// SaveVideo 以流式方式落盘视频,超过 maxBytes 视为失败;返回存储键与实际字节数。
+	SaveVideo(ctx context.Context, id string, r io.Reader, maxBytes int64) (storageKey string, size int64, err error)
 	Open(ctx context.Context, storageKey string) (io.ReadCloser, error)
+	// OpenSeek 返回可随机寻址的读取器,供 HTTP Range 请求使用。
+	OpenSeek(ctx context.Context, storageKey string) (io.ReadSeekCloser, error)
 	Delete(ctx context.Context, storageKey string) error
+	// PruneVideos 在重服视频目录总大小超过 maxBytes 时按最旧优先删除到上限内,返回删除数。
+	// 视频重服无数据库行,靠此按容量兜底,防止磁盘无限增长拖垮整个媒体存储。
+	PruneVideos(ctx context.Context, maxBytes int64) (int, error)
 }

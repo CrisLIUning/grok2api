@@ -36,6 +36,7 @@ type Job struct {
 	InputJSON       string
 	UpstreamURL     string
 	ContentType     string
+	PostID          string // grok videoPostId,视频完成后回填,供链式续拓/编辑
 	ErrorCode       string
 	ErrorMessage    string
 	LeaseUntil      *time.Time

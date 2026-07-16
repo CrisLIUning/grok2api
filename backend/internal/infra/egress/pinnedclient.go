@@ -22,8 +22,10 @@ func (l *Lease) DoPinnedHTTPS(request *http.Request, serverName string) (*http.R
 	if l == nil {
 		return nil, errors.New("出口租约未初始化")
 	}
-	if request == nil || request.URL == nil || request.URL.Scheme != "https" || request.URL.Port() != "443" {
-		return nil, errors.New("固定地址请求必须使用 HTTPS 443")
+	// 允许任意端口的 HTTPS(自托管重服常用 8443 等);SSRF 防护由下方公网 IP 校验兜底,
+	// 端口本身不放大攻击面。仍要求 https、显式端口、IP 主机。
+	if request == nil || request.URL == nil || request.URL.Scheme != "https" || request.URL.Port() == "" {
+		return nil, errors.New("固定地址请求必须使用带显式端口的 HTTPS")
 	}
 	address, err := netip.ParseAddr(request.URL.Hostname())
 	if err != nil {

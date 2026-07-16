@@ -125,6 +125,12 @@ type videoGenerationRequest struct {
 	ReferenceImages []videoGenerationImage `json:"reference_images"`
 	Output          json.RawMessage        `json:"output"`
 	StorageOptions  json.RawMessage        `json:"storage_options"`
+
+	// 视频拓展(仅支持拓展 grok 已生成的视频)。
+	Operation       string   `json:"operation"`          // "" | "extension"
+	SourceRequestID string   `json:"source_request_id"`  // 优先:我们自己的视频任务 ID
+	SourcePostID    string   `json:"source_post_id"`     // 高级:裸 grok videoPostId(须属同账号)
+	StartTime       *float64 `json:"start_time"`         // 从源视频第几秒(帧)拓展
 }
 
 type modelListItem struct {
@@ -515,7 +521,36 @@ func (h *Handler) generateVideo(c *gin.Context) {
 		}
 		referenceURLs = append(referenceURLs, urlValue)
 	}
-	if prompt == "" && len(referenceURLs) == 0 {
+	operation := strings.ToLower(strings.TrimSpace(request.Operation))
+	if operation != "" && operation != "extension" {
+		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "operation 目前仅支持 extension")
+		return
+	}
+	sourceRequestID := strings.TrimSpace(request.SourceRequestID)
+	sourcePostID := strings.TrimSpace(request.SourcePostID)
+	var startTime float64
+	if operation == "extension" {
+		// grok 只能拓展它自己生成的视频;必须给出来源(我们的任务 ID 或裸 grok postId)。
+		if sourceRequestID == "" && sourcePostID == "" {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频拓展必须提供 source_request_id 或 source_post_id")
+			return
+		}
+		if prompt == "" {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频拓展必须提供 prompt")
+			return
+		}
+		if len(referenceURLs) > 0 {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频拓展不支持参考图;请去掉 image/reference_images")
+			return
+		}
+		if request.StartTime != nil {
+			startTime = *request.StartTime
+			if startTime < 0 {
+				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "start_time 不能为负")
+				return
+			}
+		}
+	} else if prompt == "" && len(referenceURLs) == 0 {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "文本生视频必须提供 prompt；图片生视频可以省略 prompt")
 		return
 	}
@@ -526,7 +561,11 @@ func (h *Handler) generateVideo(c *gin.Context) {
 	job, err := h.gateway.CreateVideo(c.Request.Context(), gateway.VideoInput{
 		RequestID: requestID, ClientKey: clientKey, PublicModel: model,
 		Prompt: prompt, Duration: duration, AspectRatio: aspectRatio, Resolution: resolution,
-		ReferenceURLs: referenceURLs,
+		ReferenceURLs:           referenceURLs,
+		Operation:               operation,
+		SourceRequestID:         sourceRequestID,
+		SourcePostID:            sourcePostID,
+		VideoExtensionStartTime: startTime,
 	})
 	if err != nil {
 		writeGatewayError(c, err)
@@ -601,6 +640,7 @@ func videoGenerationResponse(job mediadomain.Job) gin.H {
 	case mediadomain.StatusCompleted:
 		return gin.H{
 			"status": "done", "model": job.Model, "progress": 100,
+			"request_id": job.ID, "post_id": job.PostID,
 			"video": gin.H{"url": job.UpstreamURL, "duration": job.Seconds, "respect_moderation": true},
 		}
 	case mediadomain.StatusFailed:

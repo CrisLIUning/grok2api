@@ -35,13 +35,19 @@ type VideoInput struct {
 	AspectRatio   string
 	Resolution    string
 	ReferenceURLs []string
+
+	// 视频拓展(仅支持拓展 grok 已生成的视频)。
+	Operation               string  // "" | "extension"
+	SourceRequestID         string  // 优先:我们自己的视频任务 ID → 解析出 PostID 并 pin 到源账号
+	SourcePostID            string  // 高级:裸 grok videoPostId(须属被选账号)
+	VideoExtensionStartTime float64 // 从源视频第几秒(帧)拓展
 }
 
 func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job, error) {
 	if s.mediaJobs == nil || s.mediaQueue == nil {
 		return media.Job{}, fmt.Errorf("视频任务服务未配置")
 	}
-	if len(input.Prompt) > 100000 || (len(input.Prompt) == 0 && len(input.ReferenceURLs) == 0) {
+	if len(input.Prompt) > 100000 || (len(input.Prompt) == 0 && len(input.ReferenceURLs) == 0 && input.Operation == "") {
 		return media.Job{}, fmt.Errorf("文本生视频必须提供 prompt；图片生视频可以省略 prompt")
 	}
 	routes, err := s.models.GetByPublicIDCandidates(ctx, input.PublicModel)
@@ -57,12 +63,47 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	}
 	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
-	lease, err := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
-	if err != nil {
-		return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, err)
+
+	// 视频拓展:只支持拓展 grok 已生成的视频。source_request_id 优先 —— 解析出 grok
+	// videoPostId 并把新任务 pin 到生成源视频的同一账号(post 归属账号,换号必 403)。
+	extendPostID := ""
+	pinnedAccountID := uint64(0)
+	if input.Operation == "extension" {
+		switch {
+		case input.SourceRequestID != "":
+			src, srcErr := s.mediaJobs.GetMediaJob(ctx, input.SourceRequestID, input.ClientKey.ID)
+			if srcErr != nil {
+				return media.Job{}, fmt.Errorf("拓展来源视频不存在或无权访问")
+			}
+			if src.Status != media.StatusCompleted || src.PostID == "" {
+				return media.Job{}, fmt.Errorf("拓展来源视频尚未完成或缺少 postId")
+			}
+			extendPostID = src.PostID
+			pinnedAccountID = src.AccountID
+		case input.SourcePostID != "":
+			extendPostID = input.SourcePostID
+		default:
+			return media.Job{}, fmt.Errorf("视频拓展必须提供 source_request_id 或 source_post_id")
+		}
 	}
-	accountID := lease.Credential.ID
-	lease.Release()
+
+	var accountID uint64
+	var accountName string
+	if pinnedAccountID != 0 {
+		lease, acqErr := s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.UpstreamModel, quotaMode, false)
+		if acqErr != nil {
+			return media.Job{}, fmt.Errorf("%w: 拓展来源账号不可用: %w", ErrNoAvailableAccount, acqErr)
+		}
+		accountID, accountName = lease.Credential.ID, lease.Credential.Name
+		lease.Release()
+	} else {
+		lease, acqErr := s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", nil, false)
+		if acqErr != nil {
+			return media.Job{}, fmt.Errorf("%w: %w", ErrNoAvailableAccount, acqErr)
+		}
+		accountID, accountName = lease.Credential.ID, lease.Credential.Name
+		lease.Release()
+	}
 	token, err := security.NewOpaqueToken(18)
 	if err != nil {
 		return media.Job{}, err
@@ -71,10 +112,18 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	job := media.Job{
 		ID: "video_" + token, RequestID: input.RequestID,
 		ClientKeyID: input.ClientKey.ID, ClientKeyName: input.ClientKey.Name,
-		AccountID: accountID, AccountName: lease.Credential.Name,
+		AccountID: accountID, AccountName: accountName,
 		Provider: string(route.Provider), Model: externalModel, ModelRouteID: route.ID, UpstreamModel: model.DisplayUpstreamModel(route.Provider, route.UpstreamModel), Prompt: input.Prompt,
 		Seconds: input.Duration, Size: input.AspectRatio, Quality: input.Resolution,
-		Status: media.StatusQueued, Progress: 0, InputJSON: encodeVideoInput(input.ReferenceURLs), CreatedAt: now, UpdatedAt: now,
+		Status: media.StatusQueued, Progress: 0,
+		InputJSON: encodeVideoInput(videoInputBlob{
+			ImageURLs:               input.ReferenceURLs,
+			Operation:               input.Operation,
+			ExtendPostID:            extendPostID,
+			VideoExtensionStartTime: input.VideoExtensionStartTime,
+			VideoLength:             input.Duration,
+		}),
+		CreatedAt: now, UpdatedAt: now,
 	}
 	reserved := false
 	if pricing, ok := audit.EstimateOfficialVideoCost(externalModel, input.Resolution, input.Duration); ok {
@@ -260,9 +309,18 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		return
 	}
 	lastProgress := job.Progress
+	blob := decodeVideoInput(job.InputJSON)
+	videoLength := blob.VideoLength
+	if videoLength <= 0 {
+		videoLength = job.Seconds
+	}
 	result, err := adapter.GenerateVideo(ctx, provider.VideoRequest{
 		Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
-		ReferenceURLs: decodeVideoInput(job.InputJSON),
+		ReferenceURLs:           blob.ImageURLs,
+		Operation:               blob.Operation,
+		ExtendPostID:            blob.ExtendPostID,
+		VideoExtensionStartTime: blob.VideoExtensionStartTime,
+		VideoLength:             videoLength,
 		Progress: func(value int) {
 			value = min(99, max(1, value))
 			if value-lastProgress < 5 {
@@ -321,6 +379,9 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 	now := time.Now().UTC()
 	job.Status, job.Progress, job.UpstreamURL, job.ContentType = media.StatusCompleted, 100, result.URL, result.ContentType
+	if result.PostID != "" {
+		job.PostID = result.PostID
+	}
 	applyMediaJobEgress(&job, egressTrace, route.Provider)
 	job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
 	if err := s.persistVideoJobWithRetry(parent, job); err != nil {
@@ -376,7 +437,7 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 		Provider: job.Provider, Operation: audit.OperationVideo, UsageSource: audit.UsageSourceNone,
 		AccountID: &accountID, AccountName: job.AccountName, StatusCode: statusCode, ErrorCode: job.ErrorCode,
 		EgressNodeID: job.EgressNodeID, EgressNodeName: job.EgressNodeName, EgressScope: job.EgressScope, EgressMode: audit.EgressMode(job.EgressMode),
-		MediaInputImages: int64(len(decodeVideoInput(job.InputJSON))),
+		MediaInputImages: int64(len(decodeVideoInput(job.InputJSON).ImageURLs)),
 		DurationMS:       durationMS, CreatedAt: createdAt,
 	}
 	if job.Status == media.StatusCompleted {
@@ -401,15 +462,25 @@ func (s *Service) recordVideoAudit(ctx context.Context, job media.Job, durationM
 	return s.mediaJobs.MarkMediaJobUsageRecorded(markCtx, job.ID, time.Now().UTC())
 }
 
-func encodeVideoInput(referenceURLs []string) string {
-	data, _ := json.Marshal(map[string][]string{"image_urls": referenceURLs})
+// videoInputBlob 是唯一能扛过任务恢复/重启的媒体生成输入载体,拓展参数必须存这里。
+// 旧任务只有 image_urls 也能干净解码(其余字段零值 → Operation=="" → 普通生成路径)。
+type videoInputBlob struct {
+	ImageURLs               []string `json:"image_urls,omitempty"`
+	Operation               string   `json:"operation,omitempty"`
+	ExtendPostID            string   `json:"extend_post_id,omitempty"`
+	VideoExtensionStartTime float64  `json:"video_extension_start_time,omitempty"`
+	VideoLength             int      `json:"video_length,omitempty"`
+}
+
+func encodeVideoInput(blob videoInputBlob) string {
+	data, _ := json.Marshal(blob)
 	return string(data)
 }
 
-func decodeVideoInput(value string) []string {
-	var input map[string][]string
-	_ = json.Unmarshal([]byte(value), &input)
-	return input["image_urls"]
+func decodeVideoInput(value string) videoInputBlob {
+	var blob videoInputBlob
+	_ = json.Unmarshal([]byte(value), &blob)
+	return blob
 }
 
 func (s *Service) failVideoJob(ctx context.Context, job media.Job, code string, err error) {

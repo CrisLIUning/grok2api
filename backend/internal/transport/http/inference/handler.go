@@ -1086,9 +1086,6 @@ func writeGatewayError(c *gin.Context, err error) {
 	case errors.Is(err, gateway.ErrExtensionSourceNotFound):
 		status, code = http.StatusBadRequest, "extension_source_not_found"
 		message = err.Error()
-	case errors.Is(err, gateway.ErrExtensionSourceImageVideo):
-		status, code = http.StatusBadRequest, "extension_source_unsupported"
-		message = err.Error()
 	case errors.As(err, &upstreamFailure):
 		status, code, message = upstreamFailure.HTTPStatus, upstreamFailure.Code, upstreamFailure.PublicMessage
 		if upstreamFailure.RetryAfter > 0 {

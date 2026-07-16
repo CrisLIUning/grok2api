@@ -64,10 +64,12 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	externalModel := model.ExternalPublicID(route.Provider, route.PublicID)
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 
-	// 视频拓展:只支持拓展 grok 已生成的视频。source_request_id 优先 —— 解析出 grok
-	// videoPostId 并把新任务 pin 到生成源视频的同一账号(post 归属账号,换号必 403)。
+	// 视频拓展:拓展 grok 已生成的视频。source_request_id 优先 —— 解析出 grok videoPostId
+	// 并把新任务 pin 到生成源视频的同一账号(post 归属账号,换号必 403)。若源是图生视频,
+	// 沿用其参考图 URL,拓展时重新上传并带 fileAttachments(grok 据此还原根节点)。
 	extendPostID := ""
 	pinnedAccountID := uint64(0)
+	var extensionRefs []string
 	if input.Operation == "extension" {
 		switch {
 		case input.SourceRequestID != "":
@@ -76,17 +78,18 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 			if srcErr != nil || src.Status != media.StatusCompleted || src.PostID == "" {
 				return media.Job{}, ErrExtensionSourceNotFound
 			}
-			// 图生视频(输入含参考图)grok 不认作可拓展父节点,提前拦截给清晰提示。
-			if len(decodeVideoInput(src.InputJSON).ImageURLs) > 0 {
-				return media.Job{}, ErrExtensionSourceImageVideo
-			}
 			extendPostID = src.PostID
 			pinnedAccountID = src.AccountID
+			extensionRefs = decodeVideoInput(src.InputJSON).ImageURLs
 		case input.SourcePostID != "":
 			extendPostID = input.SourcePostID
 		default:
 			return media.Job{}, fmt.Errorf("视频拓展必须提供 source_request_id 或 source_post_id")
 		}
+	}
+	blobImageURLs := input.ReferenceURLs
+	if input.Operation == "extension" {
+		blobImageURLs = extensionRefs
 	}
 
 	var accountID uint64
@@ -119,7 +122,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 		Seconds: input.Duration, Size: input.AspectRatio, Quality: input.Resolution,
 		Status: media.StatusQueued, Progress: 0,
 		InputJSON: encodeVideoInput(videoInputBlob{
-			ImageURLs:               input.ReferenceURLs,
+			ImageURLs:               blobImageURLs,
 			Operation:               input.Operation,
 			ExtendPostID:            extendPostID,
 			VideoExtensionStartTime: input.VideoExtensionStartTime,

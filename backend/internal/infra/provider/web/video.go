@@ -48,8 +48,9 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	}
 	var payload map[string]any
 	if request.Operation == "extension" {
-		// 拓展 grok 已生成的视频:extendPostId=originalPostId=parentPostId=源 videoPostId,
-		// 不上传参考图、不建 media post(与抓包一致)。
+		// 拓展 grok 已生成的视频:extendPostId=originalPostId=parentPostId=源 videoPostId。
+		// 若源是图生视频,必须重新上传原参考图并在顶层带 fileAttachments=[fileId],否则 grok
+		// 找不到根节点报 invalid-parent-post(与抓包一致)。文生视频拓展则无 fileAttachments。
 		if strings.TrimSpace(request.ExtendPostID) == "" {
 			return provider.VideoResult{}, fmt.Errorf("视频拓展缺少来源 postId")
 		}
@@ -57,26 +58,35 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		if videoLength <= 0 {
 			videoLength = segments[0]
 		}
-		payload = videoExtensionPayload(request.Prompt, request.ExtendPostID, ratio, resolution, videoLength, request.VideoExtensionStartTime)
-	} else {
-		parentID := ""
-		references := make([]string, 0, len(request.ReferenceURLs))
+		fileAttachments := make([]string, 0, len(request.ReferenceURLs))
 		for _, rawReference := range request.ReferenceURLs {
-			reference, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
+			uploaded, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
 			if referenceErr != nil {
 				return provider.VideoResult{}, referenceErr
 			}
-			references = append(references, reference)
+			if uploaded.ID != "" {
+				fileAttachments = append(fileAttachments, uploaded.ID)
+			}
 		}
-		if len(references) > 0 {
-			parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_IMAGE", references[0], "")
-		} else {
+		payload = videoExtensionPayload(request.Prompt, request.ExtendPostID, ratio, resolution, videoLength, request.VideoExtensionStartTime, fileAttachments)
+	} else {
+		uploads := make([]uploadedFile, 0, len(request.ReferenceURLs))
+		for _, rawReference := range request.ReferenceURLs {
+			uploaded, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
+			if referenceErr != nil {
+				return provider.VideoResult{}, referenceErr
+			}
+			uploads = append(uploads, uploaded)
+		}
+		parentID := ""
+		if len(uploads) == 0 {
+			// 文生视频:建 video 种子 post 作 parentPostId。图生视频用 fileAttachments+rootPostId,不建 post。
 			parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt)
+			if err != nil {
+				return provider.VideoResult{}, err
+			}
 		}
-		if err != nil {
-			return provider.VideoResult{}, err
-		}
-		payload = videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], references)
+		payload = videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], uploads)
 	}
 	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 	if err != nil {
@@ -104,23 +114,25 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	return result, nil
 }
 
-func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (string, error) {
+// prepareVideoReference 下载并上传一张参考图,返回上传结果(ID=fileId 供 fileAttachments,
+// URI=fileUri 供 imageReferences)。
+func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *egress.Lease, token, value string) (uploadedFile, error) {
 	value = strings.TrimSpace(value)
 	if value == "" {
-		return "", fmt.Errorf("视频参考图片 URL 不能为空")
+		return uploadedFile{}, fmt.Errorf("视频参考图片 URL 不能为空")
 	}
 	image, err := a.loadChatImage(ctx, lease, value, 20<<20)
 	if err != nil {
-		return "", err
+		return uploadedFile{}, err
 	}
 	uploaded, err := a.uploadImage(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine")
 	if err != nil {
-		return "", err
+		return uploadedFile{}, err
 	}
 	if uploaded.URI == "" {
-		return "", fmt.Errorf("上传视频参考图片后未返回 fileUri")
+		return uploadedFile{}, fmt.Errorf("上传视频参考图片后未返回 fileUri")
 	}
-	return uploaded.URI, nil
+	return uploaded, nil
 }
 
 func parseVideoStream(response *http.Response, progress func(int)) (provider.VideoResult, string, error) {
@@ -244,7 +256,7 @@ func videoSegments(seconds int) []int {
 // videoExtensionPayload 构造"拓展 grok 已生成视频"的 conversations/new 载荷。
 // 按抓包:extendPostId=originalPostId=parentPostId=源 videoPostId,mode=custom,
 // videoExtensionStartTime 为起始帧秒数,不带 fileAttachments/rootPostId(grok 自行追溯根)。
-func videoExtensionPayload(prompt, extendPostID, ratio, resolution string, videoLength int, startTime float64) map[string]any {
+func videoExtensionPayload(prompt, extendPostID, ratio, resolution string, videoLength int, startTime float64, fileAttachments []string) map[string]any {
 	config := map[string]any{
 		"isVideoExtension":        true,
 		"isVideoEdit":             false,
@@ -260,21 +272,51 @@ func videoExtensionPayload(prompt, extendPostID, ratio, resolution string, video
 		"videoLength":             videoLength,
 		"resolutionName":          resolution,
 	}
-	return map[string]any{
+	payload := map[string]any{
 		"temporary": true, "modelName": "imagine-video-gen", "message": prompt + " --mode=custom", "enableSideBySide": true,
 		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
 	}
+	// 拓展图生视频:顶层带原参考图的 fileId,grok 据此还原 rootPostId 血缘。
+	if len(fileAttachments) > 0 {
+		payload["fileAttachments"] = fileAttachments
+	}
+	return payload
 }
 
-func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, references []string) map[string]any {
-	config := map[string]any{"parentPostId": parentID, "aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution}
-	if len(references) > 0 {
-		config["isVideoEdit"] = false
-		config["isReferenceToVideo"] = true
-		config["imageReferences"] = references
-	}
-	return map[string]any{
+// videoCreatePayload 构造文生/图生视频的 conversations/new 载荷。图生视频按 grok-web 原生
+// 结构建立可拓展的根血缘:顶层 fileAttachments=[fileId] + config 里 rootPostId=fileId、
+// isRootUserUploaded=true、resolvedImageReferences=[fileUri](反推自拓展抓包的回显字段),
+// 这样生成的视频后续可被拓展。文生视频仍用 createMediaPost 的 parentPostId。
+func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int, uploads []uploadedFile) map[string]any {
+	config := map[string]any{"aspectRatio": ratio, "videoLength": seconds, "resolutionName": resolution, "isVideoEdit": false}
+	top := map[string]any{
 		"temporary": true, "modelName": "imagine-video-gen", "message": prompt + " --mode=custom", "enableSideBySide": true,
-		"responseMetadata": map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}},
 	}
+	if len(uploads) > 0 {
+		fileIds := make([]string, 0, len(uploads))
+		fileUris := make([]string, 0, len(uploads))
+		for _, u := range uploads {
+			if u.ID != "" {
+				fileIds = append(fileIds, u.ID)
+			}
+			if u.URI != "" {
+				fileUris = append(fileUris, u.URI)
+			}
+		}
+		config["mode"] = "custom"
+		config["isRootUserUploaded"] = true
+		config["originalPrompt"] = prompt
+		config["parentPostId"] = nil
+		if len(fileIds) > 0 {
+			config["rootPostId"] = fileIds[0]
+			top["fileAttachments"] = fileIds
+		}
+		if len(fileUris) > 0 {
+			config["resolvedImageReferences"] = fileUris
+		}
+	} else {
+		config["parentPostId"] = parentID
+	}
+	top["responseMetadata"] = map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}}
+	return top
 }

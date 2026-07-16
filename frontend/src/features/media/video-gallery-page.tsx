@@ -14,6 +14,7 @@ import { MediaMetric } from "@/features/media/media-metric";
 import type { MediaJobDTO } from "@/features/media/types";
 import { EmptyState, ErrorState, TableLoadingRow } from "@/shared/components/data-state";
 import { DataTableShell } from "@/shared/components/data-table-shell";
+import { CopyButton } from "@/shared/components/copy-button";
 import { PageHeader } from "@/shared/components/page-header";
 import { Pagination } from "@/shared/components/pagination";
 import { SortableTableHead } from "@/shared/components/sortable-table-head";
@@ -196,11 +197,15 @@ export function VideoGalleryPage() {
               {/* key 强制在切换任务时重建 video 元素,避免复用旧 src */}
               <video key={previewJob.id} src={previewJob.url} controls autoPlay preload="metadata" className="max-h-[70vh] w-full rounded-xl bg-black" />
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
-                <span className="truncate font-mono" title={previewJob.id}>{previewJob.id}</span>
+                <div className="flex min-w-0 items-center gap-1">
+                  <span className="truncate font-mono" title={previewJob.id}>{previewJob.id}</span>
+                  <CopyButton value={previewJob.id} />
+                </div>
                 <Button variant="secondary" size="sm" asChild>
                   <a href={previewJob.url} target="_blank" rel="noreferrer"><ExternalLink />{t("media.videos.openVideo")}</a>
                 </Button>
               </div>
+              <p className="rounded-md bg-secondary/40 px-3 py-2 text-[11px] leading-5 text-muted-foreground">{t("media.videos.extendHint")}</p>
             </div>
           ) : null}
         </DialogContent>

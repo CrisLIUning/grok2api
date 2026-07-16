@@ -36,6 +36,8 @@ var (
 	ErrResponseAccountUnavailable = errors.New("Response 绑定的上游账号不可用")
 	ErrResponseStateUnsupported   = errors.New("目标模型不支持有状态 Response")
 	ErrConversationUnsupported    = errors.New("目标模型不支持当前对话协议")
+	ErrExtensionSourceNotFound    = errors.New("拓展来源视频不存在或尚未完成")
+	ErrExtensionSourceImageVideo  = errors.New("图生视频(带参考图)暂不支持拓展,请改用文生视频的结果")
 )
 
 const responseOwnershipTTL = 30 * 24 * time.Hour

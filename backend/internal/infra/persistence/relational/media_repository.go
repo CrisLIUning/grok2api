@@ -119,6 +119,16 @@ func (r *MediaJobRepository) GetMediaJob(ctx context.Context, id string, clientK
 	return mediaJobToDomain(row), nil
 }
 
+// GetMediaJobByID 按任务 ID 查找,不限定 client key。用于视频拓展按不可猜的 request_id
+// 引用源视频(允许跨 key 拓展自己账号下生成的任意视频)。
+func (r *MediaJobRepository) GetMediaJobByID(ctx context.Context, id string) (media.Job, error) {
+	var row mediaJobModel
+	if err := r.db.db.WithContext(ctx).Where("id = ?", id).First(&row).Error; err != nil {
+		return media.Job{}, mapError(err)
+	}
+	return mediaJobToDomain(row), nil
+}
+
 func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job) error {
 	updates := mediaJobFromDomain(value)
 	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", value.ID)

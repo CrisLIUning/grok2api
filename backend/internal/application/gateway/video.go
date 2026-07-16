@@ -71,12 +71,14 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	if input.Operation == "extension" {
 		switch {
 		case input.SourceRequestID != "":
-			src, srcErr := s.mediaJobs.GetMediaJob(ctx, input.SourceRequestID, input.ClientKey.ID)
-			if srcErr != nil {
-				return media.Job{}, fmt.Errorf("拓展来源视频不存在或无权访问")
+			// 按不可猜的 request_id 无 key 作用域查找,允许拓展本账号池生成的任意视频。
+			src, srcErr := s.mediaJobs.GetMediaJobByID(ctx, input.SourceRequestID)
+			if srcErr != nil || src.Status != media.StatusCompleted || src.PostID == "" {
+				return media.Job{}, ErrExtensionSourceNotFound
 			}
-			if src.Status != media.StatusCompleted || src.PostID == "" {
-				return media.Job{}, fmt.Errorf("拓展来源视频尚未完成或缺少 postId")
+			// 图生视频(输入含参考图)grok 不认作可拓展父节点,提前拦截给清晰提示。
+			if len(decodeVideoInput(src.InputJSON).ImageURLs) > 0 {
+				return media.Job{}, ErrExtensionSourceImageVideo
 			}
 			extendPostID = src.PostID
 			pinnedAccountID = src.AccountID

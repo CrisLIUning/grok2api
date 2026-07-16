@@ -23,6 +23,7 @@ import {
   type VideoStatus,
 } from "@/features/creative-console/creative-console-api";
 import { getClientKeySecret, listClientKeys, type ClientKeyDTO } from "@/features/client-keys/client-keys-api";
+import { CopyButton } from "@/shared/components/copy-button";
 import { PageHeader } from "@/shared/components/page-header";
 import { cn } from "@/shared/lib/cn";
 
@@ -485,7 +486,7 @@ function VideoResult({ requestId, status, loading, error, onRetry, onExtend }: {
   return (
     <div className="w-full space-y-4" aria-live="polite">
       <div className="grid gap-3 sm:grid-cols-2">
-        <MetaItem label={t("creativeConsole.requestId")} value={requestId} mono />
+        <MetaItem label={t("creativeConsole.requestId")} value={requestId} mono copyable />
         <MetaItem label={t("creativeConsole.status")} value={status ? t(`creativeConsole.videoStatus.${status.status}`) : t("common.loading")} />
       </div>
       <div className="space-y-2">
@@ -583,8 +584,16 @@ function RetryableError({ message, onRetry }: { message: string; onRetry: () => 
   );
 }
 
-function MetaItem({ label, value, mono = false }: { label: string; value: string; mono?: boolean }) {
-  return <div className="min-w-0 py-2"><div className="mb-1 text-[11px] text-muted-foreground">{label}</div><div className={cn("truncate text-xs", mono && "font-mono")} title={value}>{value}</div></div>;
+function MetaItem({ label, value, mono = false, copyable = false }: { label: string; value: string; mono?: boolean; copyable?: boolean }) {
+  return (
+    <div className="min-w-0 py-2">
+      <div className="mb-1 text-[11px] text-muted-foreground">{label}</div>
+      <div className="flex min-w-0 items-center gap-1">
+        <div className={cn("truncate text-xs", mono && "font-mono")} title={value}>{value}</div>
+        {copyable && value ? <CopyButton value={value} /> : null}
+      </div>
+    </div>
+  );
 }
 
 function isUsableKey(key: ClientKeyDTO): boolean {

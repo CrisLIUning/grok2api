@@ -63,6 +63,14 @@ type SwaggerVideoGenerationRequest struct {
 	Duration    int    `json:"duration" example:"8"`
 	AspectRatio string `json:"aspect_ratio,omitempty" example:"16:9"`
 	Resolution  string `json:"resolution,omitempty" example:"720p"`
+	// operation="extension" 时,拓展一个 grok 已生成的视频(仅支持 grok 生成的视频,不支持上传任意 mp4)。
+	Operation string `json:"operation,omitempty" example:"extension"`
+	// 拓展来源(二选一):source_request_id 为本网关此前的视频任务 ID(优先,自动定位并锁定源账号);
+	SourceRequestID string `json:"source_request_id,omitempty" example:"video_D2dFBlN_tLOHyL8hQSxjpxbt"`
+	// source_post_id 为裸 grok videoPostId(高级用法,该 post 必须属于被选中的账号,否则多账号池大概率 403)。
+	SourcePostID string `json:"source_post_id,omitempty" example:"59d40158-a320-46eb-b651-a93084a91044"`
+	// 从源视频的第几秒(帧)开始拓展。
+	StartTime float64 `json:"start_time,omitempty" example:"4"`
 }
 
 // swaggerHealth godoc
@@ -200,7 +208,8 @@ func swaggerEditImage() {}
 func swaggerGetImage() {}
 
 // swaggerGenerateVideo godoc
-// @Summary 创建异步视频任务
+// @Summary 创建异步视频任务(支持文/图生视频,以及拓展 grok 已生成的视频)
+// @Description 普通生成:提供 prompt(可选 image/reference_images 图生视频)。视频拓展:operation="extension" + source_request_id(本网关此前的视频任务 ID,优先)或 source_post_id(裸 grok videoPostId)+ start_time(从第几秒拓展)+ prompt。注意 grok 只能拓展它自己生成的视频,不支持上传任意 mp4;拓展会自动锁定到生成源视频的同一账号。完成后 GET 结果的 video.url 为可公开访问的重服地址,post_id 可用于继续续拓。
 // @Tags Videos
 // @Security BearerAuth
 // @Accept json

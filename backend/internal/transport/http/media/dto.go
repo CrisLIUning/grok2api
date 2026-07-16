@@ -29,6 +29,8 @@ type mediaJobDTO struct {
 	CreatedAt     string  `json:"createdAt"`
 	CompletedAt   *string `json:"completedAt"`
 	ErrorMessage  string  `json:"errorMessage"`
+	URL           string  `json:"url"`    // 完成后为可播放的重服地址;未完成为空
+	PostID        string  `json:"postId"` // grok videoPostId,可用于续拓
 }
 
 type videoStatsDTO struct {

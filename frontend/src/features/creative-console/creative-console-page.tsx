@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { ArrowUp, Bot, CheckCircle2, ExternalLink, ImageIcon, KeyRound, Loader2, LockKeyhole, MessageSquareText, RefreshCw, SlidersHorizontal, Trash2, Video } from "lucide-react";
-import { useMemo, useState, type FormEvent, type KeyboardEvent } from "react";
+import { ArrowUp, Bot, CheckCircle2, Clapperboard, ExternalLink, Film, ImageIcon, KeyRound, Loader2, LockKeyhole, MessageSquareText, RefreshCw, SlidersHorizontal, Trash2, Video } from "lucide-react";
+import { useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Button } from "@/components/ui/button";
@@ -329,12 +329,17 @@ function ImagePanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
 
 function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePanelProps) {
   const { t } = useTranslation();
+  const [videoOp, setVideoOp] = useState<"generate" | "extend">("generate");
   const [prompt, setPrompt] = useState("");
   const [imageURL, setImageURL] = useState("");
   const [duration, setDuration] = useState("8");
   const [aspectRatio, setAspectRatio] = useState("16:9");
   const [resolution, setResolution] = useState("720p");
   const [showOptions, setShowOptions] = useState(false);
+  const [sourceRequestId, setSourceRequestId] = useState("");
+  const [startTime, setStartTime] = useState("0");
+  const [sourceVideoURL, setSourceVideoURL] = useState("");
+  const sourceVideoRef = useRef<HTMLVideoElement>(null);
   const [job, setJob] = useState<{ requestId: string; apiKey: string } | null>(null);
 
   const createMutation = useMutation({
@@ -350,20 +355,56 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
     retry: 2,
   });
 
+  const isExtend = videoOp === "extend";
+  const canSubmit = Boolean(apiKey) && Boolean(model) && validDuration(duration) && !createMutation.isPending
+    && (isExtend
+      ? Boolean(prompt.trim()) && Boolean(sourceRequestId.trim())
+      : Boolean(prompt.trim()) || Boolean(imageURL.trim()));
+
   function submit(event: FormEvent): void {
     event.preventDefault();
-    if (!apiKey || !model || (!prompt.trim() && !imageURL.trim()) || !validDuration(duration) || createMutation.isPending) return;
+    if (!canSubmit) return;
     setJob(null);
     createMutation.reset();
+    if (isExtend) {
+      createMutation.mutate({
+        apiKey, model, prompt: prompt.trim(),
+        operation: "extension", sourceRequestId: sourceRequestId.trim(),
+        startTime: Number(startTime) || 0,
+        duration: Number(duration), aspectRatio, resolution,
+      });
+      return;
+    }
     createMutation.mutate({
-      apiKey,
-      model,
-      prompt: prompt.trim(),
+      apiKey, model, prompt: prompt.trim(),
       imageURL: imageURL.trim() || undefined,
-      duration: Number(duration),
-      aspectRatio,
-      resolution,
+      duration: Number(duration), aspectRatio, resolution,
     });
+  }
+
+  function switchOp(next: "generate" | "extend"): void {
+    setVideoOp(next);
+    setShowOptions(next === "extend");
+  }
+
+  // 从当前生成结果发起"拓展此视频":锁定源任务 ID + 载入源视频供选帧。
+  function extendCurrent(): void {
+    if (!job) return;
+    setVideoOp("extend");
+    setSourceRequestId(job.requestId);
+    setSourceVideoURL(statusQuery.data?.video?.url ?? "");
+    setStartTime("0");
+    setPrompt("");
+    setShowOptions(true);
+    setJob(null);
+  }
+
+  // 用源视频当前播放位置作为拓展起始帧(秒)。
+  function useCurrentFrame(): void {
+    const current = sourceVideoRef.current?.currentTime;
+    if (typeof current === "number" && Number.isFinite(current)) {
+      setStartTime(String(Math.max(0, Math.round(current * 10) / 10)));
+    }
   }
 
   return (
@@ -379,6 +420,7 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
               loading={statusQuery.isPending || statusQuery.isFetching}
               error={statusQuery.isError ? statusQuery.error.message : ""}
               onRetry={() => void statusQuery.refetch()}
+              onExtend={extendCurrent}
             />
           ) : null}
         </div>
@@ -387,38 +429,46 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
       <form className="w-full shrink-0 px-3 pb-2 sm:px-6 sm:pb-3" onSubmit={submit}>
         <div className="overflow-hidden rounded-2xl border border-border/70 bg-background shadow-sm transition-shadow focus-within:shadow-md">
           {showOptions ? (
-            <div className="grid gap-2 border-b border-border/50 bg-secondary/20 p-3 sm:grid-cols-[minmax(0,1fr)_7rem_7rem_7rem]">
-              <Input
-                id="video-image"
-                type="url"
-                className="border-transparent bg-background/70 shadow-none"
-                value={imageURL}
-                onChange={(event) => setImageURL(event.target.value)}
-                placeholder={t("creativeConsole.referenceImage")}
-                aria-label={t("creativeConsole.referenceImage")}
-              />
-              <Input
-                id="video-duration"
-                type="number"
-                className="border-transparent bg-background/70 shadow-none"
-                min={1}
-                max={15}
-                step={1}
-                value={duration}
-                onChange={(event) => setDuration(event.target.value)}
-                aria-label={t("creativeConsole.duration")}
-              />
-              <CompactSelect value={aspectRatio} options={videoAspectRatios} onChange={setAspectRatio} ariaLabel={t("creativeConsole.aspectRatio")} surfaced />
-              <CompactSelect value={resolution} options={videoResolutions} onChange={setResolution} ariaLabel={t("creativeConsole.resolution")} surfaced />
-            </div>
+            isExtend ? (
+              <div className="space-y-2 border-b border-border/50 bg-secondary/20 p-3">
+                <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem]">
+                  <Input id="video-source" type="text" className="border-transparent bg-background/70 font-mono text-xs shadow-none" value={sourceRequestId} onChange={(event) => setSourceRequestId(event.target.value)} placeholder={t("creativeConsole.sourceRequestId")} aria-label={t("creativeConsole.sourceRequestId")} />
+                  <Input id="video-start" type="number" className="border-transparent bg-background/70 shadow-none" min={0} step={0.1} value={startTime} onChange={(event) => setStartTime(event.target.value)} aria-label={t("creativeConsole.startTime")} placeholder={t("creativeConsole.startTime")} />
+                </div>
+                {sourceVideoURL ? (
+                  <div className="space-y-2">
+                    <video key={sourceVideoURL} ref={sourceVideoRef} src={sourceVideoURL} controls preload="metadata" className="max-h-56 w-full rounded-lg bg-black" />
+                    <Button type="button" variant="secondary" size="sm" onClick={useCurrentFrame}><Clapperboard />{t("creativeConsole.useCurrentFrame")}</Button>
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground">{t("creativeConsole.extendHint")}</p>
+                )}
+                <div className="grid gap-2 sm:grid-cols-3">
+                  <Input id="video-duration" type="number" className="border-transparent bg-background/70 shadow-none" min={1} max={15} step={1} value={duration} onChange={(event) => setDuration(event.target.value)} aria-label={t("creativeConsole.duration")} />
+                  <CompactSelect value={aspectRatio} options={videoAspectRatios} onChange={setAspectRatio} ariaLabel={t("creativeConsole.aspectRatio")} surfaced />
+                  <CompactSelect value={resolution} options={videoResolutions} onChange={setResolution} ariaLabel={t("creativeConsole.resolution")} surfaced />
+                </div>
+              </div>
+            ) : (
+              <div className="grid gap-2 border-b border-border/50 bg-secondary/20 p-3 sm:grid-cols-[minmax(0,1fr)_7rem_7rem_7rem]">
+                <Input id="video-image" type="url" className="border-transparent bg-background/70 shadow-none" value={imageURL} onChange={(event) => setImageURL(event.target.value)} placeholder={t("creativeConsole.referenceImage")} aria-label={t("creativeConsole.referenceImage")} />
+                <Input id="video-duration" type="number" className="border-transparent bg-background/70 shadow-none" min={1} max={15} step={1} value={duration} onChange={(event) => setDuration(event.target.value)} aria-label={t("creativeConsole.duration")} />
+                <CompactSelect value={aspectRatio} options={videoAspectRatios} onChange={setAspectRatio} ariaLabel={t("creativeConsole.aspectRatio")} surfaced />
+                <CompactSelect value={resolution} options={videoResolutions} onChange={setResolution} ariaLabel={t("creativeConsole.resolution")} surfaced />
+              </div>
+            )
           ) : null}
-          <Textarea id="video-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={t("creativeConsole.videoPlaceholder")} className="min-h-24 resize-none border-0 bg-transparent px-4 py-3 text-sm focus-visible:ring-0" />
+          <Textarea id="video-prompt" value={prompt} onChange={(event) => setPrompt(event.target.value)} placeholder={isExtend ? t("creativeConsole.extendPromptPlaceholder") : t("creativeConsole.videoPlaceholder")} className="min-h-24 resize-none border-0 bg-transparent px-4 py-3 text-sm focus-visible:ring-0" />
           <div className="flex items-center justify-between gap-3 px-3 pb-3">
             <div className="flex min-w-0 items-center gap-1">
               <Button type="button" variant="ghost" size="icon" className={cn(showOptions && "bg-secondary")} aria-label={t("creativeConsole.videoOptions")} onClick={() => setShowOptions((value) => !value)}><SlidersHorizontal /></Button>
               <CompactModelSelect value={model} models={modelOptions} onChange={onModelChange} />
+              <div className="ml-1 inline-flex shrink-0 rounded-full bg-secondary/50 p-0.5">
+                <button type="button" onClick={() => switchOp("generate")} className={cn("rounded-full px-2.5 py-1 text-[11px] transition-colors", !isExtend ? "bg-background shadow-sm" : "text-muted-foreground")}>{t("creativeConsole.opGenerate")}</button>
+                <button type="button" onClick={() => switchOp("extend")} className={cn("rounded-full px-2.5 py-1 text-[11px] transition-colors", isExtend ? "bg-background shadow-sm" : "text-muted-foreground")}>{t("creativeConsole.opExtend")}</button>
+              </div>
             </div>
-            <Button type="submit" size="icon" aria-label={t("creativeConsole.generateVideo")} disabled={!apiKey || !model || (!prompt.trim() && !imageURL.trim()) || !validDuration(duration) || createMutation.isPending}>
+            <Button type="submit" size="icon" aria-label={t("creativeConsole.generateVideo")} disabled={!canSubmit}>
               {createMutation.isPending ? <Loader2 className="animate-spin" /> : <ArrowUp />}
             </Button>
           </div>
@@ -429,7 +479,7 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   );
 }
 
-function VideoResult({ requestId, status, loading, error, onRetry }: { requestId: string; status?: VideoStatus; loading: boolean; error: string; onRetry: () => void }) {
+function VideoResult({ requestId, status, loading, error, onRetry, onExtend }: { requestId: string; status?: VideoStatus; loading: boolean; error: string; onRetry: () => void; onExtend: () => void }) {
   const { t } = useTranslation();
   const progress = status?.progress ?? 0;
   return (
@@ -450,8 +500,12 @@ function VideoResult({ requestId, status, loading, error, onRetry }: { requestId
           <video src={status.video.url} controls preload="metadata" className="max-h-[60vh] w-full rounded-2xl bg-black shadow-sm" />
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="text-xs text-muted-foreground">{status.video.duration ? t("creativeConsole.videoDuration", { count: status.video.duration }) : ""}</span>
-            <Button variant="secondary" size="sm" asChild><a href={status.video.url} target="_blank" rel="noreferrer"><ExternalLink />{t("creativeConsole.openVideo")}</a></Button>
+            <div className="flex items-center gap-2">
+              <Button variant="outline" size="sm" onClick={onExtend}><Film />{t("creativeConsole.extendThis")}</Button>
+              <Button variant="secondary" size="sm" asChild><a href={status.video.url} target="_blank" rel="noreferrer"><ExternalLink />{t("creativeConsole.openVideo")}</a></Button>
+            </div>
           </div>
+          {status.postId ? <p className="truncate font-mono text-[10px] text-muted-foreground" title={status.postId}>post_id: {status.postId}</p> : null}
         </div>
       ) : null}
     </div>

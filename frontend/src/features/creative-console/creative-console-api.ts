@@ -12,6 +12,8 @@ export type VideoStatus = {
   status: "pending" | "done" | "failed";
   model?: string;
   progress: number;
+  requestId?: string;
+  postId?: string;
   video?: { url: string; duration?: number; respectModeration?: boolean };
   error?: { code?: string; message: string };
 };
@@ -89,6 +91,10 @@ export async function createVideo(input: {
   duration: number;
   aspectRatio: string;
   resolution: string;
+  operation?: "extension";
+  sourceRequestId?: string;
+  sourcePostId?: string;
+  startTime?: number;
   signal?: AbortSignal;
 }): Promise<string> {
   const body: Record<string, unknown> = {
@@ -98,7 +104,14 @@ export async function createVideo(input: {
     aspect_ratio: input.aspectRatio,
     resolution: input.resolution,
   };
-  if (input.imageURL) body.image = { url: input.imageURL };
+  if (input.operation === "extension") {
+    body.operation = "extension";
+    if (input.sourceRequestId) body.source_request_id = input.sourceRequestId;
+    if (input.sourcePostId) body.source_post_id = input.sourcePostId;
+    body.start_time = input.startTime ?? 0;
+  } else if (input.imageURL) {
+    body.image = { url: input.imageURL };
+  }
   const payload = await publicApiRequest(
     input.apiKey,
     "/videos/generations",
@@ -218,6 +231,8 @@ function readVideoStatus(payload: unknown): VideoStatus {
     progress: typeof payload.progress === "number" && Number.isFinite(payload.progress)
       ? Math.max(0, Math.min(100, payload.progress))
       : payload.status === "done" ? 100 : 0,
+    requestId: typeof payload.request_id === "string" ? payload.request_id : undefined,
+    postId: typeof payload.post_id === "string" ? payload.post_id : undefined,
   };
   if (isRecord(payload.video) && typeof payload.video.url === "string") {
     result.video = {

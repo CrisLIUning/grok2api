@@ -1,10 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
-import { AlertCircle, CheckCircle2, Clock, ListVideo, Loader2, RefreshCw, Search } from "lucide-react";
+import { AlertCircle, CheckCircle2, Clock, ExternalLink, ListVideo, Loader2, PlayCircle, RefreshCw, Search } from "lucide-react";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHeader, TableRow } from "@/components/ui/table";
@@ -32,6 +33,7 @@ export function VideoGalleryPage() {
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<VideoStatusFilter>("");
   const [sort, setSort] = useState<TableSort>({ field: "createdAt", order: "desc" });
+  const [previewJob, setPreviewJob] = useState<MediaJobDTO | null>(null);
   const debouncedSearch = useDebouncedValue(search);
   const normalizedSearch = debouncedSearch.trim();
 
@@ -147,10 +149,17 @@ export function VideoGalleryPage() {
               {videosQuery.isPending ? <TableLoadingRow colSpan={8} /> : result?.items.map((job) => (
                 <TableRow key={job.id}>
                   <TableCell className="min-w-0 py-3">
-                    <div className="min-w-0">
-                      <span className="block truncate text-xs font-medium" title={job.prompt}>{job.prompt || "-"}</span>
-                      <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground" title={job.id}>{job.id}</span>
-                      {job.errorMessage ? <span className="mt-1 block truncate text-[11px] text-destructive" title={job.errorMessage}>{job.errorMessage}</span> : null}
+                    <div className="flex min-w-0 items-start gap-2">
+                      {job.status === "completed" && job.url ? (
+                        <Button type="button" variant="ghost" size="icon" className="mt-0.5 size-6 shrink-0 text-primary" aria-label={t("media.videos.preview")} title={t("media.videos.preview")} onClick={() => setPreviewJob(job)}>
+                          <PlayCircle className="size-4" />
+                        </Button>
+                      ) : null}
+                      <div className="min-w-0">
+                        <span className="block truncate text-xs font-medium" title={job.prompt}>{job.prompt || "-"}</span>
+                        <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground" title={job.id}>{job.id}</span>
+                        {job.errorMessage ? <span className="mt-1 block truncate text-[11px] text-destructive" title={job.errorMessage}>{job.errorMessage}</span> : null}
+                      </div>
                     </div>
                   </TableCell>
                   <TableCell className="min-w-0 py-3"><span className="block truncate" title={job.model}>{job.model || "-"}</span></TableCell>
@@ -176,6 +185,26 @@ export function VideoGalleryPage() {
           </Table>
         ) : null}
       </DataTableShell>
+
+      <Dialog open={Boolean(previewJob)} onOpenChange={(open) => { if (!open) setPreviewJob(null); }}>
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle className="truncate pr-6" title={previewJob?.prompt}>{previewJob?.prompt || t("media.videos.preview")}</DialogTitle>
+          </DialogHeader>
+          {previewJob?.url ? (
+            <div className="space-y-3">
+              {/* key 强制在切换任务时重建 video 元素,避免复用旧 src */}
+              <video key={previewJob.id} src={previewJob.url} controls autoPlay preload="metadata" className="max-h-[70vh] w-full rounded-xl bg-black" />
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-muted-foreground">
+                <span className="truncate font-mono" title={previewJob.id}>{previewJob.id}</span>
+                <Button variant="secondary" size="sm" asChild>
+                  <a href={previewJob.url} target="_blank" rel="noreferrer"><ExternalLink />{t("media.videos.openVideo")}</a>
+                </Button>
+              </div>
+            </div>
+          ) : null}
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

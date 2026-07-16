@@ -49,6 +49,8 @@ const mediaJobShape = {
   createdAt: isString,
   completedAt: (value: unknown) => value === null || isString(value),
   errorMessage: isString,
+  url: isString,
+  postId: isString,
 };
 
 const decodeImageStats = createObjectDecoder<ImageStatsDTO>("image stats", {

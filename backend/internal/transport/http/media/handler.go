@@ -135,6 +135,7 @@ func (h *Handler) listVideos(c *gin.Context) {
 			AccountName: j.AccountName, ClientKeyName: j.ClientKeyName,
 			CreatedAt:   j.CreatedAt.Format("2006-01-02T15:04:05Z"),
 			CompletedAt: completedAt, ErrorMessage: j.ErrorMessage,
+			URL:         j.UpstreamURL, PostID: j.PostID,
 		})
 	}
 	response.Success(c, http.StatusOK, gin.H{"items": items, "page": page, "pageSize": pageSize, "total": total})

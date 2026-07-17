@@ -32,7 +32,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWeb, fmt.Sprintf("%d", request.Credential.ID))
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWeb, request.Credential)
 	if err != nil {
 		return provider.VideoResult{}, err
 	}
@@ -125,7 +125,7 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 	if err != nil {
 		return uploadedFile{}, err
 	}
-	uploaded, err := a.uploadImage(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine")
+	uploaded, err := a.uploadFileLegacy(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine")
 	if err != nil {
 		return uploadedFile{}, err
 	}
@@ -149,26 +149,31 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 		if errorValue, ok := root["error"].(map[string]any); ok {
 			return false, fmt.Errorf("视频上游错误: %v", errorValue["message"])
 		}
+		if errorValue := nestedMap(root, "result", "response", "error"); errorValue != nil {
+			return false, fmt.Errorf("视频上游错误: %v", errorValue["message"])
+		}
 		stream := nestedMap(root, "result", "response", "streamingVideoGenerationResponse")
-		if stream == nil {
-			return false, nil
+		if stream != nil {
+			if value, ok := numberAsInt(stream["progress"]); ok && progress != nil {
+				progress(value)
+			}
+			if value, _ := stream["videoPostId"].(string); value != "" {
+				postID = value
+			} else if value, _ := stream["videoId"].(string); value != "" {
+				postID = value
+			}
+			moderated, _ := stream["moderated"].(bool)
+			if moderated {
+				return false, nil
+			}
+			if setVideoResultURL(&result, firstString(stream, "videoUrl", "contentUrl", "contentURL", "assetUrl", "assetURL", "fileUri", "fileURL")) {
+				return true, nil
+			}
 		}
-		if value, ok := numberAsInt(stream["progress"]); ok && progress != nil {
-			progress(value)
-		}
-		if value, _ := stream["videoPostId"].(string); value != "" {
-			postID = value
-		} else if value, _ := stream["videoId"].(string); value != "" {
-			postID = value
-		}
-		moderated, _ := stream["moderated"].(bool)
-		if moderated {
-			return false, nil
-		}
-		if value, _ := stream["videoUrl"].(string); value != "" {
-			result.URL = absoluteAssetURL(value)
-			result.ContentType = "video/mp4"
-			return true, nil
+		for _, attachment := range videoFileAttachments(root) {
+			if setVideoResultURL(&result, attachment) {
+				return true, nil
+			}
 		}
 		return false, nil
 	}
@@ -319,4 +324,33 @@ func videoCreatePayload(prompt, parentID, ratio, resolution string, seconds int,
 	}
 	top["responseMetadata"] = map[string]any{"experiments": []any{}, "modelConfigOverride": map[string]any{"modelMap": map[string]any{"videoGenModelConfig": config}}}
 	return top
+}
+
+func videoFileAttachments(root map[string]any) []string {
+	modelResponse := nestedMap(root, "result", "response", "modelResponse")
+	if modelResponse == nil {
+		return nil
+	}
+	values, _ := modelResponse["fileAttachments"].([]any)
+	attachments := make([]string, 0, len(values))
+	for _, value := range values {
+		if attachment, _ := value.(string); attachment != "" {
+			attachments = append(attachments, attachment)
+		}
+	}
+	return attachments
+}
+
+func setVideoResultURL(result *provider.VideoResult, value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return false
+	}
+	lower := strings.ToLower(value)
+	if !strings.HasSuffix(strings.SplitN(lower, "?", 2)[0], ".mp4") && !strings.Contains(lower, "/content") {
+		return false
+	}
+	result.URL = absoluteAssetURL(value)
+	result.ContentType = "video/mp4"
+	return true
 }

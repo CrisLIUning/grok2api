@@ -33,7 +33,7 @@ func (a *Adapter) downloadVideoToStore(ctx context.Context, credential account.C
 	defer cancel()
 	var lastErr error
 	for attempt := 0; attempt < mediaOutputAttempts; attempt++ {
-		id, retryable, attemptErr := a.downloadVideoAttempt(downloadCtx, credential.ID, token, parsed.String())
+		id, retryable, attemptErr := a.downloadVideoAttempt(downloadCtx, credential, token, parsed.String())
 		if attemptErr == nil {
 			return id, nil
 		}
@@ -49,8 +49,13 @@ func (a *Adapter) downloadVideoToStore(ctx context.Context, credential account.C
 }
 
 // downloadVideoAttempt 每次沿用同一账号,只允许出口管理器重新选择资源节点。
-func (a *Adapter) downloadVideoAttempt(ctx context.Context, accountID uint64, token, rawURL string) (string, bool, error) {
-	lease, err := a.egress.Acquire(ctx, domainegress.ScopeWebAsset, fmt.Sprintf("%d", accountID))
+//
+// 必须走 AcquireCredential 而非 Acquire:前者才会带上该账号的 Cloudflare cookie
+// 与粘性代理绑定。上游把同构的 downloadImageAttempt 迁过去时不会碰这个文件
+// ——它是 fork 独有的——而旧的 Acquire 仍然存在,漏迁**不会有任何编译错误**,
+// 只会让视频下载悄悄失去 CF 绕过和出口粘性。
+func (a *Adapter) downloadVideoAttempt(ctx context.Context, credential account.Credential, token, rawURL string) (string, bool, error) {
+	lease, err := a.egress.AcquireCredential(ctx, domainegress.ScopeWebAsset, credential)
 	if err != nil {
 		return "", true, err
 	}

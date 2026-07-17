@@ -133,6 +133,9 @@ type Response struct {
 	UpstreamURL string
 	Diagnostic  *DiagnosticResponse
 	RateLimit   *RateLimitMetadata
+	// ModelCatalogChanged 表示上游推理响应中的模型目录 ETag 与该账号
+	// 最近一次成功 /models 同步的 ETag 不一致。
+	ModelCatalogChanged bool
 }
 
 const (
@@ -185,18 +188,19 @@ type DeviceAuthorization struct {
 
 // CredentialSeed 表示登录或导入后尚未持久化的 OAuth 凭据。
 type CredentialSeed struct {
-	Provider     account.Provider
-	AuthType     account.AuthType
-	WebTier      account.WebTier
-	Name         string
-	Email        string
-	UserID       string
-	TeamID       string
-	SourceKey    string
-	OIDCClientID string
-	AccessToken  string
-	RefreshToken string
-	ExpiresAt    time.Time
+	Provider          account.Provider
+	AuthType          account.AuthType
+	WebTier           account.WebTier
+	Name              string
+	Email             string
+	UserID            string
+	TeamID            string
+	SourceKey         string
+	OIDCClientID      string
+	AccessToken       string
+	RefreshToken      string
+	CloudflareCookies string
+	ExpiresAt         time.Time
 }
 
 type QuotaSnapshot struct {
@@ -215,6 +219,7 @@ type ImageGenerationRequest struct {
 	Resolution     string
 	ResponseFormat string
 	Streaming      bool
+	PartialImages  int
 }
 
 type ImageInput struct {
@@ -229,12 +234,18 @@ type ImageEditRequest struct {
 	Prompt         string
 	ImageURLs      []string
 	Count          int
+	Size           string
+	AspectRatio    string
 	Resolution     string
 	ResponseFormat string
+	Streaming      bool
+	PartialImages  int
 }
 
 type VideoRequest struct {
-	Credential    account.Credential
+	Credential account.Credential
+	// JobID 绑定本地视频任务，供 XAI ZDR 上传票据与结果资产关联。
+	JobID         string
 	Prompt        string
 	Duration      int
 	AspectRatio   string
@@ -242,9 +253,12 @@ type VideoRequest struct {
 	ReferenceURLs []string
 	Progress      func(int)
 
-	// 视频编辑/拓展(grok web videoGenModelConfig)。Operation 为空表示普通文生/图生视频。
+	// FORK DELTA — 视频编辑/拓展(grok web videoGenModelConfig)。
+	// 上游的 ZDR 上传链路结构性不支持拓展(其 buildVideoCreatePayload 完全没有
+	// extendPostId,且 buildVideoMaxImages=1),故这条能力只存在于 web 链路。
+	// Operation 为空表示普通文生/图生视频。
 	Operation               string  // "" | "extension" | "edit"
-	ExtendPostID            string  // 源视频的 grok videoPostId(extension/edit 用作 extendPostId/originalPostId/parentPostId)
+	ExtendPostID            string  // 源视频的 grok videoPostId(用作 extendPostId/originalPostId/parentPostId)
 	VideoExtensionStartTime float64 // 从源视频第几秒(帧)拓展
 	VideoLength             int     // 目标片段长度(拓展新增秒数);为 0 时回退 Duration
 }
@@ -252,7 +266,12 @@ type VideoRequest struct {
 type VideoResult struct {
 	URL         string
 	ContentType string
-	PostID      string // grok videoPostId,用于链式续拓/编辑
+	// AssetID 非空时表示结果已写入本地媒体资产，内容读取应走 MediaObjectStorage。
+	AssetID string
+	// PostID 是 grok 侧的 videoPostId。与 AssetID 正交:AssetID 说"结果存在哪",
+	// PostID 说"它在 grok 那边是谁" —— 视频拓展靠后者把 extendPostId 指回源视频。
+	// FORK DELTA:上游没有拓展能力,故只有 AssetID。
+	PostID string
 }
 
 // RefreshedCredential 表示 OAuth 刷新后的旋转凭据。
@@ -275,6 +294,13 @@ type ResponseAdapter interface {
 type ModelCatalogAdapter interface {
 	Adapter
 	ListModels(ctx context.Context, credential account.Credential) ([]string, error)
+}
+
+// AccountModelCapabilityNormalizer 可选：按 Billing 快照归一化账号模型能力。
+// 未实现时模型同步原样写入上游目录；billing 为 nil 表示 Unknown（无快照）。
+type AccountModelCapabilityNormalizer interface {
+	Adapter
+	NormalizeAccountModelCapabilities(models []string, billing *account.Billing) []string
 }
 
 type BillingAdapter interface {
@@ -326,7 +352,10 @@ type ImageEditAdapter interface {
 type ImageAssetStore interface {
 	SaveImage(ctx context.Context, data []byte) (media.Asset, error)
 	PublicImageURL(id string) string
-	// SaveVideo 流式归档重服视频,返回不可猜测的资源 ID;PublicVideoURL 返回其公开地址。
+	// FORK DELTA — 视频落本地存储。
+	// SaveVideo 流式归档重服视频(视频动辄数百 MB,不能像图片那样整段读进内存),
+	// 返回不可猜测的资源 ID;PublicVideoURL 返回其公开地址。
+	// 上游走 AssetID + Begin/Commit/Abort 那套 ZDR 资产模型,没有这两个方法。
 	SaveVideo(ctx context.Context, r io.Reader) (string, error)
 	PublicVideoURL(id string) string
 }
@@ -334,6 +363,13 @@ type ImageAssetStore interface {
 type VideoAdapter interface {
 	Adapter
 	GenerateVideo(ctx context.Context, request VideoRequest) (VideoResult, error)
+}
+
+// VideoContentDownloader streams a completed provider video using the
+// credential that created the job. Callers must enforce job ownership first.
+type VideoContentDownloader interface {
+	VideoAdapter
+	DownloadVideo(ctx context.Context, credential account.Credential, rawURL string) (io.ReadCloser, string, int64, error)
 }
 
 type RoutingMetadataAdapter interface {

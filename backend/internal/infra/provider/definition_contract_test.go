@@ -49,6 +49,10 @@ func TestProductionProviderDefinitionsMatchImplementedCapabilities(t *testing.T)
 			capabilities: []modeldomain.Capability{modeldomain.CapabilityResponses},
 			credential:   provider.CredentialSurface{AuthType: account.AuthTypeOAuth, Import: true, Refresh: true, DeviceOAuth: true},
 			conversation: provider.ConversationSurface{Responses: true, ChatCompletions: true, Messages: true, Compact: true, StoredResponses: true},
+			// FORK DELTA:上游的 Build 视频走 XAI ZDR 上传链(cli/video.go),我们没有采纳
+			// ——它的 buildVideoCreatePayload 完全没有 extendPostId、且 buildVideoMaxImages=1,
+			// 结构性支撑不了我们的视频拓展。Build 侧因此不声明视频能力。
+			media:        provider.MediaSurface{},
 			inference:    provider.InferencePolicy{Usage: provider.UsageUpstream},
 		},
 		{
@@ -64,7 +68,7 @@ func TestProductionProviderDefinitionsMatchImplementedCapabilities(t *testing.T)
 			capabilities: []modeldomain.Capability{modeldomain.CapabilityResponses},
 			credential:   provider.CredentialSurface{AuthType: account.AuthTypeSSO, Import: true},
 			conversation: provider.ConversationSurface{Responses: true, ChatCompletions: true, Messages: true},
-			inference:    provider.InferencePolicy{Usage: provider.UsageUpstream},
+			inference:    provider.InferencePolicy{Usage: provider.UsageUpstream, RetryForbiddenAsEgress: true},
 		},
 	}
 	for _, test := range tests {

@@ -741,7 +741,7 @@ func (a *Adapter) EditImage(ctx context.Context, request provider.ImageEditReque
 	}
 	refs := make([]string, 0, len(images))
 	parentID := ""
-	directUploadAvailable := true
+	directUploadAvailable := useDirectFileUploadV2
 	for _, image := range images {
 		uploaded, directAvailable, uploadErr := a.uploadFileWithFallback(ctx, cfg, lease, token, image, cfg.BaseURL+"/imagine", imagineSelfUploadSource, directUploadAvailable)
 		directUploadAvailable = directAvailable
@@ -1145,6 +1145,21 @@ func appendCapturedImageURL(results *[]string, value string) {
 		*results = append(*results, value)
 	}
 }
+
+// useDirectFileUploadV2 控制 **imagine 上传**(图片编辑 / 图生视频的素材)是否走
+// Grok 的 V2 直传端点。聊天附件走的是另一条上传(attachments.go),不受此开关影响
+// ——那条路我们没有实测过失败,不该跟着分叉。
+//
+// FORK DELTA — 关着。2026-07-17 线上实测:图片编辑经 V2 连续 6 次 429
+// "Too many requests",而同一时刻同一批免费号的普通图片 200、legacy 上传也 200
+// (合并前一直靠它)。两条上传路的限流各自独立,V2 对我们的免费号池就是不通。
+//
+// 上游默认开启,且其回退只认"端点不存在"(404/405/410/501)——429 不回退,
+// 于是编辑整条失效。不掰上游的回退语义(那个设计是自洽的),只是不 opt-in。
+//
+// 哪天 V2 对我们的号池可用了,翻成 true —— 但要先实测,别凭"上游有了所以我们也要"。
+// 见 upload_v2_delta_test.go。
+const useDirectFileUploadV2 = false
 
 func (a *Adapter) uploadFileWithFallback(ctx context.Context, cfg Config, lease *egress.Lease, token string, file provider.ImageInput, referer, fileSource string, directAvailable bool) (uploadedFile, bool, error) {
 	if directAvailable {

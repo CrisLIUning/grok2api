@@ -21,16 +21,38 @@ func listModelsFor(t *testing.T, tier account.WebTier) map[string]bool {
 	return got
 }
 
-// 免费账号在 grok.com 网页上实测可用视频生成/拓展与图片编辑(2026-07-17)。
-// 早前把它们标成 Super,后果不是报错而是**静默减产**:免费号拿不到这些能力,
-// 路由层直接跳过,495 个号全程闲置。没有断言就没人会发现。
-func TestListModels_BasicTierGetsVideoAndImageEdit(t *testing.T) {
+// 2026-07-17 用免费账号经本网关实测 Grok:Imagine 全家桶全部返回 200
+// (视频还生成出了真实 mp4)。早前把它们标成 Super,后果不是报错而是**静默
+// 减产**——免费号拿不到能力,路由层直接跳过,495 个号在 Imagine 上全程零请求。
+// 没有断言就没人会发现。
+func TestListModels_BasicTierGetsAllImagineModels(t *testing.T) {
 	got := listModelsFor(t, account.WebTierBasic)
 
-	for _, model := range []string{"grok-imagine-video", "imagine-image-edit"} {
+	for _, model := range []string{
+		"grok-imagine-image",
+		"grok-imagine-image-quality",
+		"imagine-image-edit",
+		"grok-imagine-video",
+	} {
 		if !got[model] {
-			t.Errorf("免费账号应能用 %s(网页实测可用),否则它会被路由层跳过", model)
+			t.Errorf("免费账号应能用 %s(实测 200),否则它会被路由层跳过", model)
 		}
+	}
+}
+
+// 与上一条相对:chat 模式是 Grok 真正按订阅锁的东西。实测免费号请求
+// auto/expert/heavy 一律拿到 403 "Model is not found"。放开它们不会带来产能,
+// 只会让请求白跑一趟上游才被拒——烧往返、烧账号信誉。
+func TestListModels_BasicTierExcludesPaidChatModes(t *testing.T) {
+	got := listModelsFor(t, account.WebTierBasic)
+
+	for _, model := range []string{"grok-chat-auto", "grok-chat-expert", "grok-chat-heavy"} {
+		if got[model] {
+			t.Errorf("免费账号不该拿到 %s(实测 403 Model is not found)", model)
+		}
+	}
+	if !got["grok-chat-fast"] {
+		t.Error("grok-chat-fast 是免费号唯一可用的 chat 模式(实测 200),不能漏")
 	}
 }
 

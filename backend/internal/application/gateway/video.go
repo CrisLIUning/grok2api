@@ -379,7 +379,11 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 		}
 		failureCancel()
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
-		s.failVideoJob(parent, job, "generation_failed", err)
+		// 原始 err 带着 Grok 的响应体,不能进 job.ErrorMessage —— 那会一路出到
+		// 客户端。见 sanitizeVideoFailure。
+		failureCode, publicErr := sanitizeVideoFailure(err)
+		s.logger.Warn("video_generation_failed", "job_id", job.ID, "code", failureCode, "error", err)
+		s.failVideoJob(parent, job, failureCode, publicErr)
 		return
 	}
 	now := time.Now().UTC()
@@ -539,4 +543,34 @@ func (s *Service) persistVideoJobWithRetry(ctx context.Context, job media.Job) e
 		}
 	}
 	return lastErr
+}
+
+// sanitizeVideoFailure 把上游错误翻译成"可以给客户端看"的版本。
+//
+// provider 层为了排障,把 Grok 的**原始响应体**塞进了错误消息
+// (infra/provider/web/video.go 的 videoUpstreamError)。那个消息会一路进
+// job.ErrorMessage,再原样出现在客户端的视频查询响应里 —— 实测泄漏过:
+//
+//	{"message":"视频上游返回 429: {\"error\":{\"code\":8,\"message\":\"Too many requests\"}}"}
+//
+// 泄漏的是上游的错误码、字段名和实现细节。我们是转售面,客户端不该看到我们的
+// 上游是谁、长什么样。原始错误仍会进日志与审计,只是不出网关。
+//
+// 上游(chenyme)只对 401/403 脱敏、429/5xx 照样透传——对他们合理(用户就是
+// 账号主人),对我们不成立。故这里对**一切带上游状态码的错误**统一改写。
+//
+// 脱敏不等于抹平:限流仍给 rate_limited,客户端据此才知道该退避而不是改参数。
+// 我们自有的错误(如 ErrExtensionSourceNotFound)本来就是写给客户端看的,原样透出。
+func sanitizeVideoFailure(err error) (string, error) {
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok && !errors.Is(err, provider.ErrUnauthorized) {
+		return "generation_failed", err
+	}
+	if errors.Is(err, provider.ErrUnauthorized) {
+		return "provider_unavailable", errors.New("上游账号暂不可用,请稍后重试")
+	}
+	if status == http.StatusTooManyRequests {
+		return "rate_limited", errors.New("上游繁忙,请稍后重试")
+	}
+	return "provider_unavailable", errors.New("上游服务暂不可用,请稍后重试")
 }

@@ -412,12 +412,7 @@ func (a *Adapter) WarmStatsig(ctx context.Context, credential account.Credential
 		return 0, err
 	}
 	defer lease.Release()
-	baseURL := strings.TrimRight(cfg.BaseURL, "/")
-	return a.statsig.Warm(ctx, cfg.BaseURL, cfg.StatsigSignerURL, token, lease, []statsigWarmTarget{
-		{method: http.MethodPost, target: baseURL + "/rest/app-chat/conversations/new"},
-		{method: http.MethodPost, target: baseURL + "/rest/rate-limits"},
-		{method: http.MethodPost, target: baseURL + "/rest/media/post/create"},
-	})
+	return a.statsig.Warm(ctx, cfg.BaseURL, cfg.StatsigSignerURL, token, lease, statsigWarmTargetsFor(cfg.BaseURL))
 }
 
 func (a *Adapter) invalidateSignedStatsig(method, target string) bool {
@@ -430,4 +425,30 @@ func (a *Adapter) invalidateSignedStatsig(method, target string) bool {
 		return true
 	}
 	return false
+}
+
+// statsigWarmTargetsFor 列出需要预热 statsig 签名的热路径。
+//
+// 预热是一次 metaContent 请求签出多个键(见 Warm 的注释:"避免按账号或按路径重复
+// 抓取首页")。漏掉一个热路径,那条链路的每次调用都要额外现抓一次 Grok 首页——
+// 多一个往返、多一次暴露面。
+//
+// FORK DELTA — upload-file 是我们补的,上游名单里没有它。它是图片编辑与图生视频
+// 参考图的必经之路,也是唯一没进名单的热路径。
+//
+// ⚠️ 诚实标注:这条改动**不解决**图片编辑的低成功率。当初是拿被自己的 V2 回归
+// 污染过的数据推出的假设(以为是反爬),实测加上它之后成功率仍是 0/10。真正的
+// 根因是**所有账号共用一个出口 IP,而 Grok 的 imagine 端点按 IP 限流**——
+// 成功率与请求量成反比(chat 4 次 100%,image-edit 30 次 10%),换号无用。
+// 解法是上游的粘性代理({account} 占位 → 每账号独立出口 IP)。
+//
+// 保留它的理由变成了:少一个首页往返 = 少烧一点那个瓶颈 IP 的配额。
+func statsigWarmTargetsFor(configuredBaseURL string) []statsigWarmTarget {
+	baseURL := strings.TrimRight(configuredBaseURL, "/")
+	return []statsigWarmTarget{
+		{method: http.MethodPost, target: baseURL + "/rest/app-chat/conversations/new"},
+		{method: http.MethodPost, target: baseURL + "/rest/rate-limits"},
+		{method: http.MethodPost, target: baseURL + "/rest/media/post/create"},
+		{method: http.MethodPost, target: baseURL + "/rest/app-chat/upload-file"},
+	}
 }

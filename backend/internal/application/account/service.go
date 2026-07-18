@@ -1664,6 +1664,28 @@ func (s *Service) DecrementWebQuota(ctx context.Context, id uint64, mode string,
 	return s.DecrementQuota(ctx, id, mode, amount)
 }
 
+// defaultQuotaExhaustionRecovery 是拿不到真实恢复时间时的兜底重探间隔。
+//
+// 取值要保守:上游若仍在限流,下一次探测会再次耗尽(自我纠正);而把 reset_at
+// 写成 NULL 是不可逆的 —— 见 resolveQuotaResetAt。
+const defaultQuotaExhaustionRecovery = 15 * time.Minute
+
+// resolveQuotaResetAt 保证一次配额耗尽**永远是有界的**。
+//
+// ExhaustQuota 此前允许 resetAt 保持 nil,于是两头一起失守:窗口以
+// reset_at=NULL 落库,而恢复调度被 `if resetAt != nil` 跳过。恢复扫描过滤
+// reset_at IS NOT NULL,选号又排除 Remaining<=0 的账号 —— 该账号对这个 mode
+// 就此永久出局,没有任何东西会再把它捞回来。
+//
+// nil 不是罕见分支:该 mode 此前没有窗口(新模式、或从未同步过的账号)、窗口
+// 的 WindowSeconds<=0、GetQuotaWindows 报错,任何一种都会落到这里。
+func resolveQuotaResetAt(resetAt *time.Time, now time.Time) time.Time {
+	if resetAt != nil && resetAt.After(now) {
+		return *resetAt
+	}
+	return now.Add(defaultQuotaExhaustionRecovery)
+}
+
 func (s *Service) ExhaustQuota(ctx context.Context, id uint64, mode string, resetAt *time.Time) error {
 	if resetAt == nil {
 		windows, err := s.accounts.GetQuotaWindows(ctx, []uint64{id})
@@ -1683,11 +1705,14 @@ func (s *Service) ExhaustQuota(ctx context.Context, id uint64, mode string, rese
 			}
 		}
 	}
-	if err := s.accounts.ExhaustQuotaWindow(ctx, id, mode, resetAt, s.now()); err != nil {
+	// 兜底必须在写库之前定下来:reset_at=NULL 的窗口既不会被恢复扫描捞到
+	// (它过滤 reset_at IS NOT NULL),也不会被选号选中(Remaining<=0 被排除)。
+	recoverAt := resolveQuotaResetAt(resetAt, s.now())
+	if err := s.accounts.ExhaustQuotaWindow(ctx, id, mode, &recoverAt, s.now()); err != nil {
 		return err
 	}
-	if resetAt != nil && s.quotaQueue != nil {
-		return s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: mode, DueAt: *resetAt})
+	if s.quotaQueue != nil {
+		return s.quotaQueue.ScheduleQuotaRecovery(ctx, accountdomain.QuotaRecoveryEvent{AccountID: id, Mode: mode, DueAt: recoverAt})
 	}
 	return nil
 }

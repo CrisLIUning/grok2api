@@ -191,10 +191,20 @@ func (s *Service) executeImage(
 		response, err = execute(ctx, route.Provider, credential, route.UpstreamModel)
 		if err != nil {
 			s.logger.Error("image_upstream_failed", "event_id", eventID, "request_id", requestID, "model", externalModel, "provider", route.Provider, "account_id", credential.ID, "error", err)
+			// Imagine 的 WebSocket 路径没有 HTTP 响应可回,限流只能以带状态码的
+			// 错误呈现(webUpstreamError)。此前这里不看状态码就直接 return,
+			// 于是 imagine-image-quality / -edit 的 429 一次都不换号。
+			status, _ := provider.ErrorHTTPStatus(err)
 			if !provider.IsMediaPostProcessingError(err) {
-				s.selector.MarkFailure(ctx, credential, 0, 0)
+				s.selector.MarkFailure(ctx, credential, status, 0)
 			}
 			lease.Release()
+			if retryableOnAnotherAccount(status) && attempt+1 < attempts {
+				failedCredential := credential
+				lastCredentialFailure = &failedCredential
+				lastCredentialError = err
+				continue
+			}
 			errorCode := "upstream_unavailable"
 			if provider.IsMediaPostProcessingError(err) {
 				errorCode = "media_postprocessing_failed"
@@ -208,11 +218,19 @@ func (s *Service) executeImage(
 			delete(excluded, credential.ID)
 			continue
 		}
-		if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && response.StatusCode == http.StatusTooManyRequests && lease.QuotaMode != "" {
+		if response.StatusCode == http.StatusTooManyRequests {
 			retryAfter := parseRetryAfter(response.Header.Get("Retry-After"), time.Now().UTC())
-			exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
-			s.selector.MarkQuotaStateChanged(credential.Provider)
-			if reconcileErr != nil || !exhausted {
+			// 配额记账需要一个真实的远端配额窗口,imagine 系模型没有(它们在
+			// catalog 里没有 Mode,Grok 的 /rest/rate-limits 也只认 auto/fast)。
+			// 但**换号重试不该被记账能力绑架** —— 此前整个重试分支都挂在
+			// `lease.QuotaMode != ""` 上,于是 imagine 的 429 一次都不轮换。
+			reconciled := false
+			if quotaKind, _ := s.providers.QuotaKind(credential.Provider); quotaKind == provider.QuotaRemoteWindow && lease.QuotaMode != "" {
+				exhausted, reconcileErr := s.accounts.ReconcileWebRateLimit(ctx, credential.ID, lease.QuotaMode, retryAfter)
+				s.selector.MarkQuotaStateChanged(credential.Provider)
+				reconciled = reconcileErr == nil && exhausted
+			}
+			if !reconciled {
 				s.selector.MarkFailure(ctx, credential, response.StatusCode, retryAfter)
 			}
 			if attempt+1 < attempts {

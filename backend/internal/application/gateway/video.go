@@ -43,6 +43,53 @@ type VideoInput struct {
 	VideoExtensionStartTime float64 // 从源视频第几秒(帧)拓展
 }
 
+// videoExtensionSource 是一次续拍的来源:要续的 post、它归属的账号,以及源任务
+// 的参考图(续拍要沿用)。
+type videoExtensionSource struct {
+	PostID        string
+	AccountID     uint64
+	ReferenceURLs []string
+}
+
+// resolveVideoExtensionSource 定位续拍来源。
+//
+// 两条入口必须解析出**同一个归属账号**:extendPostId 与 originalPostId /
+// parentPostId 是同一个 post,只有创建它的账号的会话解析得了,pin 错账号就是
+// 稳定的 invalid-parent-post(403)。
+//
+// source_post_id 分支此前只设 postId、不解析账号,任务因此落到随机取号 ——
+// 那行注释写着「须属被选账号」,可账号是我们随机选的,调用方无从保证,于是这条
+// 入口实际上是必挂的。media_jobs 里本来就同时存着 PostID 与 AccountID,反查即可。
+//
+// 号池里查不到的 postId 一律拒绝:它的归属账号无从得知,续拍必然失败,早点如实
+// 拒绝好过随机挑个账号再回一个语焉不详的 403。
+func (s *Service) resolveVideoExtensionSource(ctx context.Context, input VideoInput) (videoExtensionSource, error) {
+	if input.Operation != videoOperationExtension {
+		return videoExtensionSource{}, nil
+	}
+	var (
+		src    media.Job
+		srcErr error
+	)
+	switch {
+	case input.SourceRequestID != "":
+		// 按不可猜的 request_id 无 key 作用域查找,允许拓展本账号池生成的任意视频。
+		src, srcErr = s.mediaJobs.GetMediaJobByID(ctx, input.SourceRequestID)
+	case input.SourcePostID != "":
+		src, srcErr = s.mediaJobs.GetMediaJobByPostID(ctx, input.SourcePostID)
+	default:
+		return videoExtensionSource{}, fmt.Errorf("视频拓展必须提供 source_request_id 或 source_post_id")
+	}
+	if srcErr != nil || src.Status != media.StatusCompleted || src.PostID == "" || src.AccountID == 0 {
+		return videoExtensionSource{}, ErrExtensionSourceNotFound
+	}
+	return videoExtensionSource{
+		PostID:        src.PostID,
+		AccountID:     src.AccountID,
+		ReferenceURLs: decodeVideoInput(src.InputJSON).ImageURLs,
+	}, nil
+}
+
 func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job, error) {
 	if s.mediaJobs == nil || s.mediaQueue == nil {
 		return media.Job{}, fmt.Errorf("视频任务服务未配置")
@@ -67,26 +114,13 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	// 视频拓展:拓展 grok 已生成的视频。source_request_id 优先 —— 解析出 grok videoPostId
 	// 并把新任务 pin 到生成源视频的同一账号(post 归属账号,换号必 403)。若源是图生视频,
 	// 沿用其参考图 URL,拓展时重新上传并带 fileAttachments(grok 据此还原根节点)。
-	extendPostID := ""
-	pinnedAccountID := uint64(0)
-	var extensionRefs []string
-	if input.Operation == "extension" {
-		switch {
-		case input.SourceRequestID != "":
-			// 按不可猜的 request_id 无 key 作用域查找,允许拓展本账号池生成的任意视频。
-			src, srcErr := s.mediaJobs.GetMediaJobByID(ctx, input.SourceRequestID)
-			if srcErr != nil || src.Status != media.StatusCompleted || src.PostID == "" {
-				return media.Job{}, ErrExtensionSourceNotFound
-			}
-			extendPostID = src.PostID
-			pinnedAccountID = src.AccountID
-			extensionRefs = decodeVideoInput(src.InputJSON).ImageURLs
-		case input.SourcePostID != "":
-			extendPostID = input.SourcePostID
-		default:
-			return media.Job{}, fmt.Errorf("视频拓展必须提供 source_request_id 或 source_post_id")
-		}
+	source, err := s.resolveVideoExtensionSource(ctx, input)
+	if err != nil {
+		return media.Job{}, err
 	}
+	extendPostID := source.PostID
+	pinnedAccountID := source.AccountID
+	extensionRefs := source.ReferenceURLs
 	blobImageURLs := input.ReferenceURLs
 	if input.Operation == "extension" {
 		blobImageURLs = extensionRefs

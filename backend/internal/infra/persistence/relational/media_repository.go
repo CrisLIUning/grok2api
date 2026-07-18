@@ -129,6 +129,28 @@ func (r *MediaJobRepository) GetMediaJobByID(ctx context.Context, id string) (me
 	return mediaJobToDomain(row), nil
 }
 
+// GetMediaJobByPostID 按 grok 的 videoPostId 反查生成它的任务,用于续拍时确定
+// 归属账号 —— extendPostId 只有创建它的账号的会话解析得了。
+//
+// 空 postId 直接判未找到:media_jobs 里绝大多数行的 post_id 都是空串(默认值),
+// 让空值走进查询会匹配到一条毫不相干的任务,把续拍 pin 到错误的账号上。
+//
+// 同一个 postId 理论上只对应一条任务,这里仍按创建时间倒序取最新一条,保证
+// 历史数据里万一有重复时结果是确定的。
+func (r *MediaJobRepository) GetMediaJobByPostID(ctx context.Context, postID string) (media.Job, error) {
+	if strings.TrimSpace(postID) == "" {
+		return media.Job{}, repository.ErrNotFound
+	}
+	var row mediaJobModel
+	if err := r.db.db.WithContext(ctx).
+		Where("post_id = ?", postID).
+		Order("created_at DESC, id DESC").
+		First(&row).Error; err != nil {
+		return media.Job{}, mapError(err)
+	}
+	return mediaJobToDomain(row), nil
+}
+
 func (r *MediaJobRepository) UpdateMediaJob(ctx context.Context, value media.Job) error {
 	updates := mediaJobFromDomain(value)
 	query := r.db.db.WithContext(ctx).Model(&mediaJobModel{}).Where("id = ?", value.ID)

@@ -76,6 +76,8 @@ var schemaIndexes = []string{
 	"CREATE INDEX IF NOT EXISTS idx_media_assets_kind_created ON media_assets(kind, created_at DESC, id)",
 	"CREATE INDEX IF NOT EXISTS idx_media_upload_tickets_expires ON media_upload_tickets(expires_at, consumed_at)",
 	"CREATE INDEX IF NOT EXISTS idx_media_jobs_result_asset ON media_jobs(result_asset_id) WHERE result_asset_id <> ''",
+	// 续拍按 grok 的 videoPostId 反查归属账号;部分索引避开占绝大多数的空 post_id。
+	"CREATE INDEX IF NOT EXISTS idx_media_jobs_post_id ON media_jobs(post_id) WHERE post_id <> ''",
 }
 
 // InitializeSchema 以当前持久化模型作为首版数据库结构基线。

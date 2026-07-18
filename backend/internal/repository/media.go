@@ -43,6 +43,7 @@ type MediaJobRepository interface {
 	CreateMediaJob(ctx context.Context, value media.Job) error
 	GetMediaJob(ctx context.Context, id string, clientKeyID uint64) (media.Job, error)
 	GetMediaJobByID(ctx context.Context, id string) (media.Job, error)
+	GetMediaJobByPostID(ctx context.Context, postID string) (media.Job, error)
 	UpdateMediaJob(ctx context.Context, value media.Job) error
 	ListMediaJobs(ctx context.Context, query MediaJobListQuery) ([]media.Job, int64, error)
 	SummarizeMediaJobs(ctx context.Context) (MediaJobStats, error)

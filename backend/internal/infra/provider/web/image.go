@@ -14,6 +14,7 @@ import (
 	"net/textproto"
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -651,8 +652,10 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 			continue
 		}
 		if message["type"] == "error" {
-			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
+			upstreamErr := imagineWSFrameError(message)
+			if status, report := imagineWSEgressStatus(upstreamErr); report {
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, nil)
+			}
 			return nil, upstreamErr
 		}
 		collector.Accept(message)
@@ -1203,7 +1206,7 @@ func (a *Adapter) uploadFileV2Direct(ctx context.Context, cfg Config, lease *egr
 			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, response.StatusCode, nil)
 		}
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, directFileUploadResponseLimit))
-		return uploadedFile{}, fmt.Errorf("V2 上传文件返回 %d", response.StatusCode)
+		return uploadedFile{}, upstreamStatusFailure(response.StatusCode, "V2 上传文件返回 "+strconv.Itoa(response.StatusCode))
 	}
 	uploaded, err := decodeDirectFileUploadResponse(io.LimitReader(response.Body, directFileUploadResponseLimit))
 	if err != nil {
@@ -1282,8 +1285,12 @@ func (a *Adapter) uploadFileLegacy(ctx context.Context, cfg Config, lease *egres
 		FileID         string `json:"fileId"`
 		FileURI        string `json:"fileUri"`
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 || json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&value) != nil {
-		return uploadedFile{}, fmt.Errorf("上传文件失败或上游响应无效")
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		// 状态码必须留在错误类型里,否则上层的换号重试认不出这是 429/5xx。
+		return uploadedFile{}, upstreamStatusFailure(response.StatusCode, "上传文件返回 "+strconv.Itoa(response.StatusCode))
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&value) != nil {
+		return uploadedFile{}, errors.New("上传文件成功但上游响应无效")
 	}
 	if value.FileMetadataID == "" {
 		value.FileMetadataID = value.FileID
@@ -1316,8 +1323,9 @@ func (a *Adapter) createMediaPost(ctx context.Context, cfg Config, lease *egress
 			ID string `json:"id"`
 		} `json:"post"`
 	}
-	if response.StatusCode < 200 || response.StatusCode >= 300 || json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&value) != nil || value.Post.ID == "" {
-		return "", fmt.Errorf("创建媒体 Post 失败")
+	decodeErr := json.NewDecoder(io.LimitReader(response.Body, 2<<20)).Decode(&value)
+	if err := mediaPostFailure(response.StatusCode, decodeErr, value.Post.ID); err != nil {
+		return "", err
 	}
 	return value.Post.ID, nil
 }
@@ -1457,8 +1465,10 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 			continue
 		}
 		if message["type"] == "error" {
-			upstreamErr := fmt.Errorf("Imagine WebSocket 返回错误")
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, upstreamErr)
+			upstreamErr := imagineWSFrameError(message)
+			if status, report := imagineWSEgressStatus(upstreamErr); report {
+				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, nil)
+			}
 			_ = writer.CloseWithError(upstreamErr)
 			return
 		}

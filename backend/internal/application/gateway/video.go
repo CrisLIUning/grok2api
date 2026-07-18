@@ -296,18 +296,6 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if err := s.mediaJobs.UpdateMediaJob(ctx, job); err != nil {
 		s.logger.Warn("video_job_progress_write_failed", "job_id", job.ID, "error", err)
 	}
-	// 视频任务创建时已持久化账号归属；恢复只能重新获取原账号，禁止因后续
-	// 轮询或结果处理失败切换到其他账号。
-	lease, err := s.selector.AcquirePinned(ctx, route.Provider, job.AccountID, route.UpstreamModel, "", true)
-	if err != nil {
-		if parent.Err() != nil {
-			s.deferVideoJob(parent, job)
-			return
-		}
-		s.failVideoJob(parent, job, "account_unavailable", err)
-		return
-	}
-	defer lease.Release()
 	adapter, ok := s.providers.Videos(route.Provider)
 	if !ok {
 		s.failVideoJob(parent, job, "provider_unavailable", ErrNoAvailableAccount)
@@ -319,90 +307,142 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	if videoLength <= 0 {
 		videoLength = job.Seconds
 	}
-	result, err := adapter.GenerateVideo(ctx, provider.VideoRequest{
-		Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
-		ReferenceURLs:           blob.ImageURLs,
-		Operation:               blob.Operation,
-		ExtendPostID:            blob.ExtendPostID,
-		VideoExtensionStartTime: blob.VideoExtensionStartTime,
-		VideoLength:             videoLength,
-		Progress: func(value int) {
-			value = min(99, max(1, value))
-			if value-lastProgress < 5 {
+	// 续拍必须锁定源账号:extendPostId 只有创建它的账号的会话解析得了,换号是
+	// 100% 的 invalid-parent-post。首发则允许有界换号 —— 上游在读流之前拒绝
+	// (429/5xx)时 postId 尚不存在,什么都没提交。判据见 videoRotatableFailure。
+	attempts := 1
+	if blob.Operation != videoOperationExtension {
+		attempts = max(1, int(s.maxAttempts.Load()))
+	}
+	excluded := make(map[uint64]bool)
+	for attempt := 0; attempt < attempts; attempt++ {
+		lease, err := s.acquireVideoAccount(ctx, route, job.AccountID, attempt, excluded)
+		if err != nil {
+			if parent.Err() != nil {
+				s.deferVideoJob(parent, job)
 				return
 			}
-			lastProgress = value
-			job.Progress, job.UpdatedAt = value, time.Now().UTC()
-			leaseUntil := job.UpdatedAt.Add(videoJobLease)
-			job.LeaseUntil = &leaseUntil
-			updateCtx, updateCancel := context.WithTimeout(context.Background(), 3*time.Second)
-			_ = s.mediaJobs.UpdateMediaJob(updateCtx, job)
-			updateCancel()
-		},
-	})
-	if err != nil {
-		if parent.Err() != nil {
-			s.deferVideoJob(parent, job)
+			s.failVideoJob(parent, job, "account_unavailable", err)
 			return
 		}
-		failureCtx, failureCancel := context.WithTimeout(context.Background(), finalizationTimeout)
-		failureHandled := false
-		if errors.Is(err, provider.ErrUnauthorized) {
-			if lease.Credential.AuthType == account.AuthTypeSSO {
-				_ = s.accounts.MarkReauthRequired(failureCtx, lease.Credential.ID, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
-			}
-			s.selector.MarkFailure(failureCtx, lease.Credential, http.StatusUnauthorized, 0)
-			failureHandled = true
-		} else if status, ok := provider.ErrorHTTPStatus(err); ok {
-			switch {
-			case status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(lease.Credential.Provider):
-				// Web Provider 已对 anti-bot 403 降低出口健康并重建浏览器会话；
-				// 视频请求已提交，不能换号重试，也不能误伤账号池。
-				failureHandled = true
-			case (status == http.StatusPaymentRequired || status == http.StatusTooManyRequests) && lease.QuotaMode != "":
-				exhausted, reconcileErr := s.accounts.ReconcileRateLimit(failureCtx, lease.Credential.ID, lease.QuotaMode, 0)
-				s.selector.MarkQuotaStateChanged(lease.Credential.Provider)
-				if reconcileErr != nil || !exhausted {
-					s.selector.MarkFailure(failureCtx, lease.Credential, status, 0)
+		excluded[lease.Credential.ID] = true
+		// 换到的账号必须随任务落库:完成时 job.PostID 写回,而日后的续拍是拿
+		// job.AccountID 反查归属账号的(CreateVideo 的 source_request_id 分支)。
+		// 两者不一致 = 那条视频的每一次续拍都必然 invalid-parent-post。
+		job.AccountID, job.AccountName = lease.Credential.ID, lease.Credential.Name
+		result, genErr := adapter.GenerateVideo(ctx, provider.VideoRequest{
+			Credential: lease.Credential, Prompt: job.Prompt, Duration: job.Seconds, AspectRatio: job.Size, Resolution: job.Quality,
+			ReferenceURLs:           blob.ImageURLs,
+			Operation:               blob.Operation,
+			ExtendPostID:            blob.ExtendPostID,
+			VideoExtensionStartTime: blob.VideoExtensionStartTime,
+			VideoLength:             videoLength,
+			Progress: func(value int) {
+				value = min(99, max(1, value))
+				if value-lastProgress < 5 {
+					return
 				}
-				failureHandled = true
-			case status >= http.StatusInternalServerError:
-				// 5xx 是 Provider 服务级故障，不应让某个账号退出号池。
-				failureHandled = true
-			default:
-				s.selector.MarkFailure(failureCtx, lease.Credential, status, 0)
-				failureHandled = true
+				lastProgress = value
+				job.Progress, job.UpdatedAt = value, time.Now().UTC()
+				leaseUntil := job.UpdatedAt.Add(videoJobLease)
+				job.LeaseUntil = &leaseUntil
+				updateCtx, updateCancel := context.WithTimeout(context.Background(), 3*time.Second)
+				_ = s.mediaJobs.UpdateMediaJob(updateCtx, job)
+				updateCancel()
+			},
+		})
+		if genErr != nil {
+			if parent.Err() != nil {
+				lease.Release()
+				s.deferVideoJob(parent, job)
+				return
 			}
+			s.recordVideoAttemptFailure(lease, genErr)
+			lease.Release()
+			// 还有预算、且能证明上游什么都没收下 → 换个账号重来。
+			if attempt+1 < attempts && videoRotatableFailure(blob.Operation, genErr) {
+				s.logger.Warn("video_generation_rotating", "job_id", job.ID, "attempt", attempt+1, "account_id", job.AccountID, "error", genErr)
+				continue
+			}
+			applyMediaJobEgress(&job, egressTrace, route.Provider)
+			// 原始 err 带着 Grok 的响应体,不能进 job.ErrorMessage —— 那会一路出到
+			// 客户端。见 sanitizeVideoFailure。
+			failureCode, publicErr := sanitizeVideoFailure(genErr)
+			s.logger.Warn("video_generation_failed", "job_id", job.ID, "code", failureCode, "error", genErr)
+			s.failVideoJob(parent, job, failureCode, publicErr)
+			return
 		}
-		if !failureHandled && !provider.IsMediaPostProcessingError(err) {
-			s.selector.MarkFailure(failureCtx, lease.Credential, 0, 0)
+		now := time.Now().UTC()
+		job.Status, job.Progress, job.UpstreamURL, job.ContentType = media.StatusCompleted, 100, result.URL, result.ContentType
+		if result.PostID != "" {
+			job.PostID = result.PostID
 		}
-		failureCancel()
 		applyMediaJobEgress(&job, egressTrace, route.Provider)
-		// 原始 err 带着 Grok 的响应体,不能进 job.ErrorMessage —— 那会一路出到
-		// 客户端。见 sanitizeVideoFailure。
-		failureCode, publicErr := sanitizeVideoFailure(err)
-		s.logger.Warn("video_generation_failed", "job_id", job.ID, "code", failureCode, "error", err)
-		s.failVideoJob(parent, job, failureCode, publicErr)
+		job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
+		if err := s.persistVideoJobWithRetry(parent, job); err != nil {
+			s.logger.Error("video_job_terminal_write_failed", "job_id", job.ID, "error", err)
+			lease.Release()
+			return
+		}
+		s.selector.MarkSuccess(context.Background(), lease.Credential)
+		if err := s.recordVideoAudit(context.Background(), job, time.Since(startedAt).Milliseconds()); err != nil {
+			s.logger.Error("video_usage_record_failed", "job_id", job.ID, "event_id", "video_usage_"+job.ID, "error", err)
+		}
+		if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow && lease.QuotaMode == "weekly" {
+			s.accounts.QueueQuotaRefresh(job.AccountID, lease.QuotaMode)
+		}
+		lease.Release()
 		return
 	}
-	now := time.Now().UTC()
-	job.Status, job.Progress, job.UpstreamURL, job.ContentType = media.StatusCompleted, 100, result.URL, result.ContentType
-	if result.PostID != "" {
-		job.PostID = result.PostID
+}
+
+// acquireVideoAccount 取本次尝试要用的账号。
+//
+// 第一次尝试沿用任务入队时选定的账号(AcquirePinned);续拍永远只有这一次。
+// 后续尝试则从号池里另选,并排除已经失败过的账号。
+func (s *Service) acquireVideoAccount(ctx context.Context, route model.Route, pinnedAccountID uint64, attempt int, excluded map[uint64]bool) (*accountLease, error) {
+	if attempt == 0 {
+		return s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.UpstreamModel, "", true)
 	}
-	applyMediaJobEgress(&job, egressTrace, route.Provider)
-	job.LeaseUntil, job.UpdatedAt, job.CompletedAt = nil, now, &now
-	if err := s.persistVideoJobWithRetry(parent, job); err != nil {
-		s.logger.Error("video_job_terminal_write_failed", "job_id", job.ID, "error", err)
-		return
+	return s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, "", "", excluded, false)
+}
+
+// recordVideoAttemptFailure 把一次生成失败记到账号/配额账上。
+//
+// 从 runVideoJob 里抽出来只是为了让重试循环读得懂,归因规则一字未改。
+func (s *Service) recordVideoAttemptFailure(lease *accountLease, err error) {
+	failureCtx, failureCancel := context.WithTimeout(context.Background(), finalizationTimeout)
+	defer failureCancel()
+	failureHandled := false
+	if errors.Is(err, provider.ErrUnauthorized) {
+		if lease.Credential.AuthType == account.AuthTypeSSO {
+			_ = s.accounts.MarkReauthRequired(failureCtx, lease.Credential.ID, fmt.Sprintf("%s SSO credential rejected", lease.Credential.Provider))
+		}
+		s.selector.MarkFailure(failureCtx, lease.Credential, http.StatusUnauthorized, 0)
+		failureHandled = true
+	} else if status, ok := provider.ErrorHTTPStatus(err); ok {
+		switch {
+		case status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(lease.Credential.Provider):
+			// Web Provider 已对 anti-bot 403 降低出口健康并重建浏览器会话;
+			// 这是出口身份问题而非账号问题,不能误伤账号池。
+			failureHandled = true
+		case (status == http.StatusPaymentRequired || status == http.StatusTooManyRequests) && lease.QuotaMode != "":
+			exhausted, reconcileErr := s.accounts.ReconcileRateLimit(failureCtx, lease.Credential.ID, lease.QuotaMode, 0)
+			s.selector.MarkQuotaStateChanged(lease.Credential.Provider)
+			if reconcileErr != nil || !exhausted {
+				s.selector.MarkFailure(failureCtx, lease.Credential, status, 0)
+			}
+			failureHandled = true
+		case status >= http.StatusInternalServerError:
+			// 5xx 是 Provider 服务级故障,不应让某个账号退出号池。
+			failureHandled = true
+		default:
+			s.selector.MarkFailure(failureCtx, lease.Credential, status, 0)
+			failureHandled = true
+		}
 	}
-	s.selector.MarkSuccess(context.Background(), lease.Credential)
-	if err := s.recordVideoAudit(context.Background(), job, time.Since(startedAt).Milliseconds()); err != nil {
-		s.logger.Error("video_usage_record_failed", "job_id", job.ID, "event_id", "video_usage_"+job.ID, "error", err)
-	}
-	if quotaKind, _ := s.providers.QuotaKind(route.Provider); quotaKind == provider.QuotaRemoteWindow && lease.QuotaMode == "weekly" {
-		s.accounts.QueueQuotaRefresh(job.AccountID, lease.QuotaMode)
+	if !failureHandled && !provider.IsMediaPostProcessingError(err) {
+		s.selector.MarkFailure(failureCtx, lease.Credential, 0, 0)
 	}
 }
 

@@ -263,6 +263,13 @@ func (s *Service) executeImage(
 			record.DurationMS, record.CreatedAt = time.Since(startedAt).Milliseconds(), time.Now().UTC()
 			applyAuditEgress(&record, egressTrace, route.Provider)
 			if response.StatusCode >= 200 && response.StatusCode < 300 && errorCode == "" {
+				// 成功也要记在账号上。此前图片路径只有 MarkFailure、没有 MarkSuccess
+				// (只有 video.go 调了),于是**只有失败的账号会被持久化记录**:
+				// 成功过的账号 last_used_at 永远为空,在轮转排序里等同于"从未使用",
+				// 永远排在候选最前被反复挑中;失败过的反倒被记住并排到后面。
+				// 线上表现就是 1803 个账号里只有二十几个在干活。
+				// 顺带:markSuccess 会清掉恢复过来的账号的 failureCount/cooldown/lastError。
+				s.selector.MarkSuccess(persistCtx, credential)
 				record.MediaOutputImages = int64(max(0, requestedCount))
 				var pricing audit.PricingResult
 				var priced bool

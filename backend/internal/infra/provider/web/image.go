@@ -600,6 +600,10 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 	headers.Set("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
 	headers.Set("Cache-Control", "no-cache")
 	headers.Set("Pragma", "no-cache")
+	// Imagine 走 WebSocket，这条路自己拼 header，不经 applyAppHeaders —— 之前
+	// 补 Client Hints 时正是漏了它，而它恰恰是图片/视频真正走的那条。浏览器发起
+	// WebSocket 升级时同样会带 Sec-Ch-Ua，缺了它这里的指纹依旧自相矛盾。
+	applyClientHintsToFHTTP(headers, lease.UserAgent)
 	connection, response, err := lease.DialWebSocket(ctx, wsURL, headers, 30*time.Second)
 	if err != nil {
 		status := 0

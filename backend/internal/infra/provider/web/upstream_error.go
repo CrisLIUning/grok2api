@@ -8,9 +8,11 @@ import (
 	"strconv"
 	"strings"
 
+	fhttp "github.com/bogdanfinn/fhttp"
 	"github.com/bogdanfinn/websocket"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/browserheaders"
 )
 
 // webUpstreamError 让 Imagine WebSocket 的上游拒绝把状态码带出函数边界。
@@ -169,5 +171,19 @@ func (a *Adapter) feedbackUpstreamError(ctx context.Context, nodeID uint64, err 
 		a.egress.Feedback(context.WithoutCancel(ctx), nodeID, status, nil)
 	case egressBlameTransport:
 		a.egress.Feedback(context.WithoutCancel(ctx), nodeID, 0, err)
+	}
+}
+
+// applyClientHintsToFHTTP 把 Chromium Client Hints 写进 fhttp.Header。
+//
+// WebSocket 拨号用的是 tls-client 的 fhttp.Header，与标准库 http.Header 是两个
+// 类型，所以先在标准 header 上生成再搬过去，避免把提示头的生成逻辑复制一份。
+func applyClientHintsToFHTTP(target fhttp.Header, userAgent string) {
+	staging := http.Header{}
+	browserheaders.ApplyChromiumClientHints(staging, userAgent)
+	for key, values := range staging {
+		for _, value := range values {
+			target.Set(key, value)
+		}
 	}
 }

@@ -828,10 +828,19 @@ func (r *AccountRepository) MarkBuildAPIFallback(ctx context.Context, id uint64,
 }
 
 func (r *AccountRepository) UpdateHealth(ctx context.Context, id uint64, failureCount int, cooldownUntil *time.Time, lastError string, success bool) error {
-	updates := map[string]any{"failure_count": failureCount, "cooldown_until": cooldownUntil, "last_error": truncate(lastError, 512)}
-	if success {
-		now := time.Now().UTC()
-		updates["last_used_at"] = &now
+	// last_used_at 同时是账号轮转的**跨重启记忆**(见 gateway.rotationLastSelected),
+	// 所以失败也要写:我们确实把这个账号交出去用过了。
+	//
+	// 只在成功时写会造成:被上游拒绝过的账号在库里看起来"从未使用",冷却一过就
+	// 又浮到候选最前,被反复挑中烧穿。线上实测 1803 个账号里只有 20 个被用过,
+	// 正是这个循环的产物。
+	//
+	// success 参数保留在签名里(仓储接口的一部分,不为这个改动动接口),但不再
+	// 决定是否写 last_used_at。
+	now := time.Now().UTC()
+	updates := map[string]any{
+		"failure_count": failureCount, "cooldown_until": cooldownUntil,
+		"last_error": truncate(lastError, 512), "last_used_at": &now,
 	}
 	return r.db.db.WithContext(ctx).Model(&accountModel{}).Where("id = ?", id).Updates(updates).Error
 }

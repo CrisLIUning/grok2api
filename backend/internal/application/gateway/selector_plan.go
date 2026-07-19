@@ -123,7 +123,7 @@ func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingC
 		score := candidateScore{
 			index: index, tier: tierOrderRank(tierOrder, candidate.Credential.WebTier),
 			preferFreeBuild: s.preferFreeBuild && candidate.IsKnownFreeBuild(),
-			inFlight:        inFlight[index], lastSelected: s.lastSelectedAt[candidate.Credential.ID],
+			inFlight:        inFlight[index], lastSelected: rotationLastSelected(s.lastSelectedAt, candidate.Credential),
 		}
 		if candidate.Billing != nil {
 			score.remaining = candidate.Billing.Remaining()
@@ -140,4 +140,27 @@ func (s *Selector) planCandidates(ctx context.Context, values []account.RoutingC
 
 func accountConcurrencyKey(accountID uint64) string {
 	return "account:" + strconv.FormatUint(accountID, 10)
+}
+
+// rotationLastSelected 取"上次把这个账号交出去"的时间,用于轮转排序。
+//
+// lastSelectedAt 是内存 map,进程一重启就清空;而打分的最终裁决是
+// `left.ID < right.ID`。basic 账号没有配额窗口,tier/priority/remaining/
+// billingFresh/inFlight 全部打平,于是一路平到最后一条,由 **id 最小者胜出**。
+//
+// 两件事叠加的后果:每次重启都从最小 id 重新挑起,把同一批账号反复烧穿。
+// 线上实测 1803 个 grok_web 账号里只有 20 个被用过(id 17-29 那一段),
+// 其余 1783 个从未被选中 —— 号池等于只有二十几个账号在供应。
+//
+// 持久化的 last_used_at 记录的正是同一件事,内存没有记录时回落到它,
+// 轮转的记忆就跨过了重启。真正从未被选中的账号返回零值,排在所有用过的
+// 账号之前 —— 先用没碰过的,正是我们要的。
+func rotationLastSelected(inMemory map[uint64]time.Time, credential account.Credential) time.Time {
+	if value, ok := inMemory[credential.ID]; ok {
+		return value
+	}
+	if credential.LastUsedAt != nil {
+		return *credential.LastUsedAt
+	}
+	return time.Time{}
 }

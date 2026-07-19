@@ -14,10 +14,12 @@ import (
 )
 
 const (
-	startupRecoveryBudget    = 20 * time.Second
-	startupCriticalWindow    = 2 * time.Minute
-	startupCriticalLimit     = 100
-	statsigWarmupInterval    = 15 * time.Minute
+	startupRecoveryBudget = 20 * time.Second
+	startupCriticalWindow = 2 * time.Minute
+	startupCriticalLimit  = 100
+	statsigWarmupInterval = 15 * time.Minute
+	// statsigWarmupGateTimeout 是启动补偿等待预热的上限,超时也放行。
+	statsigWarmupGateTimeout = 45 * time.Second
 	webQuotaStaleAfter       = 30 * time.Minute
 	webQuotaCatchupEvery     = 30 * time.Minute
 	modelCatalogStaleAfter   = 24 * time.Hour
@@ -45,6 +47,34 @@ type startupState struct {
 	updatedAt time.Time
 	report    startupReport
 	statsig   httpserver.ReadinessComponent
+
+	// statsigSettled 在共享签名预热落定后关闭。"落定"包含失败与无账号 ——
+	// 等待方只是想知道"还要不要再等",不是等成功。
+	statsigSettled chan struct{}
+	settleStatsig  sync.Once
+}
+
+// statsigSettledStates 列出预热的终态。warming 是中间态,不在其中。
+var statsigSettledStates = map[string]bool{"warm": true, "unavailable": true, "disabled": true}
+
+// awaitStatsigSettled 等共享签名预热落定,超时或上下文取消则返回 false。
+//
+// 存在的理由:启动时的配额补偿会一次性提交上百个账号(并发 25),每个都要一份
+// statsig 签名。签名缓存只在内存里,容器一重启就全空,于是补偿抢在预热之前跑,
+// 上百次缓存未命中同时砸向第三方签名服务 —— 服务被打垮,同一时刻的真实图片
+// 请求也拿不到签名,最终以 403「反机器人」告终。2026-07-19 线上就是这样:
+// 补偿 100 个账号失败 74 个,而图片请求跑了 106 秒后 403。
+func (s *startupState) awaitStatsigSettled(ctx context.Context, timeout time.Duration) bool {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-s.statsigSettled:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return false
+	}
 }
 
 func newStartupState(restoredQuotaRecoveries int) *startupState {
@@ -56,7 +86,8 @@ func newStartupState(restoredQuotaRecoveries int) *startupState {
 			StartedAt:               now,
 			QuotaRecoveriesRestored: restoredQuotaRecoveries,
 		},
-		statsig: httpserver.ReadinessComponent{State: "cold"},
+		statsig:        httpserver.ReadinessComponent{State: "cold"},
+		statsigSettled: make(chan struct{}),
 	}
 }
 
@@ -95,6 +126,9 @@ func (s *startupState) setStatsig(state, detail string, warmed int) {
 	}
 	s.updatedAt = time.Now().UTC()
 	s.mu.Unlock()
+	if statsigSettledStates[state] {
+		s.settleStatsig.Do(func() { close(s.statsigSettled) })
+	}
 }
 
 func (s *startupState) snapshot() (string, time.Time, startupReport, httpserver.ReadinessComponent) {
@@ -345,6 +379,14 @@ func (a *Application) runStatsigWarmup(ctx context.Context) {
 }
 
 func (a *Application) queueDueWebQuotaRefresh(ctx context.Context) {
+	// 先等共享签名预热落定再放量。这上百个刷新每个都要一份 statsig 签名,而签名
+	// 缓存只在内存里、重启即空;抢在预热之前跑就是上百次缓存未命中同时砸向第三方
+	// 签名服务,把它打垮的同时也饿死真实用户请求(线上表现为图片 403「反机器人」)。
+	// 等不到也照常继续 —— 按需重试本来就是设计好的兜底,不能让签名服务宕机卡死启动。
+	if !a.startup.awaitStatsigSettled(ctx, statsigWarmupGateTimeout) {
+		a.logger.Warn("web_quota_startup_catchup_ungated",
+			"reason", "共享签名预热未在时限内落定，补偿仍继续但可能加重签名服务压力")
+	}
 	windows, err := a.accounts.ListDueWebQuotaWindows(ctx, time.Now().UTC(), 1000)
 	if err != nil {
 		a.logger.Warn("web_quota_startup_catchup_failed", "error", err)

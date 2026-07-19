@@ -102,38 +102,9 @@ func TestImagineWSFrameError_EmptyFrameStillErrors(t *testing.T) {
 	}
 }
 
-// 这是本次事故的核心断言:限流**绝不能**被算成出口节点的传输故障。
-//
-// 返回值语义:(status, report)。report==false 表示完全不向 egress 汇报。
-// 无论哪一类,都不允许再以 transportErr 的形式上报 —— 调用点因此只能写成
-// Feedback(ctx, nodeID, status, nil),让 manager 走它自己的状态码分支。
-func TestImagineWSEgressStatus_RateLimitNeverCoolsNode(t *testing.T) {
-	usageLimit := imagineWSFrameError(map[string]any{"type": "error", "message": "usage limit reached"})
-	status, report := imagineWSEgressStatus(usageLimit)
-	if !report {
-		t.Fatal("限流应当上报 429:manager 对 429 是显式豁免的,上报它既诚实又为将来的按出口限流留了钩子")
-	}
-	if status != http.StatusTooManyRequests {
-		t.Fatalf("限流必须以 429 上报(manager 的 401/429 分支直接 return,不罚节点);得到 %d", status)
-	}
-}
-
-func TestImagineWSEgressStatus_AntiBotReportedAsForbidden(t *testing.T) {
-	// 反机器人确实与出口身份(IP/UA/Cookie)相关,该算节点账上 —— 但要走 403
-	// 分支(降健康度、不设冷却),而不是 transport 分支(设 30s 冷却)。
-	antiBot := imagineWSFrameError(map[string]any{"type": "error", "message": "anti-bot challenge failed"})
-	status, report := imagineWSEgressStatus(antiBot)
-	if !report || status != http.StatusForbidden {
-		t.Errorf("反机器人应以 403 上报;得到 status=%d report=%v", status, report)
-	}
-}
-
-func TestImagineWSEgressStatus_UnknownErrorNotBlamedOnNode(t *testing.T) {
-	unknown := imagineWSFrameError(map[string]any{"type": "error", "message": "prompt violates content policy"})
-	if _, report := imagineWSEgressStatus(unknown); report {
-		t.Error("内容策略之类的上游拒绝与出口节点无关,不应上报,更不能因此冷却节点")
-	}
-}
+// 出口归因(限流不得被算成传输故障)的断言已迁到 egress_blame_test.go 的
+// classifyEgressBlame 上 —— 那里连 close 帧、异常断连、真传输故障一并覆盖,
+// 而这里原先只测得到 error 帧这一种形状。
 
 // createMediaPost 曾把四种完全不同的失败塌成一句无状态码的错误:
 //

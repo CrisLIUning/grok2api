@@ -1,11 +1,14 @@
 package web
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/bogdanfinn/websocket"
 
 	"github.com/chenyme/grok2api/backend/internal/infra/provider"
 )
@@ -90,35 +93,81 @@ func imagineWSFramePayload(frame map[string]any) map[string]any {
 	return frame
 }
 
-// imagineWSEgressStatus 决定一个 Imagine WebSocket 上游错误要不要算到出口节点账上,
-// 以及以什么状态码上报。返回 (status, report);report 为 false 表示完全不上报。
+// egressBlame 表示一次失败该由谁负责。
+type egressBlame int
+
+const (
+	// egressBlameNone:上游的应用层拒绝,或对端正常收尾。节点把活干完了,不该罚。
+	egressBlameNone egressBlame = iota
+	// egressBlameStatus:以上游状态码上报,交给 egress manager 自己的状态码分支处置。
+	egressBlameStatus
+	// egressBlameTransport:真链路故障,原样上报,该冷却就冷却。
+	egressBlameTransport
+)
+
+// classifyEgressBlame 是"这次失败该不该算到出口节点头上"的唯一判据。
 //
-// 这个函数存在的理由是一次线上事故。原来的调用点是:
+// 事故复盘:上游的应用层拒绝(限流)被当成传输故障上报 ——
+// Feedback(nodeID, 0, err),status=0 且 transportErr 非空,在 egress manager
+// 的 switch 里落进 default 分支:冷却 30 秒(翻倍至 10 分钟),LastError 写成
+// "transport error"。grok_web 当时只有一个节点,于是 Grok 对 Imagine 的一次限流
+// 把整个作用域打下线,连完全健康的会话流量一起挂掉;而运维侧看到的是"代理传输
+// 错误",查了很久代理,代理始终是好的。
 //
-//	a.egress.Feedback(ctx, lease.NodeID, 0, upstreamErr)
+// 第一版修复只堵了 {"type":"error"} 这一种帧形状,漏了三条同机制的活路,其中
+// 最要命的是 close 帧:Grok 限流时直接关闭 WebSocket,ReadMessage 返回
+// *websocket.CloseError(bogdanfinn/websocket conn.go:983),照样进传输故障分支。
 //
-// status=0 且 transportErr 非空,会直落 egress manager 的 default 分支 ——
-// FailureCount++、Health*0.7、冷却 30 秒(翻倍至 10 分钟),LastError 写成
-// "transport error"。而 grok_web 当时只有一个节点,冷却期内 Acquire 硬失败。
-// 于是 Grok 对 Imagine 的一次限流,把整个作用域(含完全健康的会话流量)打下线
-// 30 秒;运维侧看到的却是"代理传输错误",查了半天代理,而代理没有任何问题。
-//
-// 现在按类别区分:
-//   - 用量到顶 → 429。manager 对 401/429 是显式豁免的(直接 return,不罚),
-//     所以这既不冷却节点,又为将来"按出口维度做限流调度"留下了真实信号。
-//   - 反机器人 → 403。它确实与出口身份(IP / User-Agent / CF Cookie)绑定,
-//     该算节点账上;manager 的 403 分支只降健康度并重建客户端,不设冷却。
-//   - 其它 → 不上报。节点把消息完整送达了,上游拒绝的是我们的请求内容。
-//
-// 无论哪一类都不再以 transportErr 形式上报,调用点因此只能写成
-// Feedback(ctx, nodeID, status, nil)。
-func imagineWSEgressStatus(err error) (int, bool) {
+// 所以归因收敛到这里,每个上报点都问同一个问题。判定顺序即优先级:
+//  1. 已被识别的上游语义(限流 / 反机器人)——最可靠,直接按状态码上报。
+//  2. 错误自带上游状态码(webUpstreamError / videoUpstreamError)。
+//  3. WebSocket close 帧:异常断连(1006 / 1015)是真链路故障;其余属对端主动
+//     收尾,再用同一张词汇表看关闭理由里有没有限流/反机器人。
+//  4. 其余一律按真传输故障处理 —— 宁可错罚,也不能让坏掉的代理逃过健康检测。
+func classifyEgressBlame(err error) (egressBlame, int) {
+	if err == nil {
+		return egressBlameNone, 0
+	}
 	switch {
 	case errors.Is(err, errWebUsageLimit):
-		return http.StatusTooManyRequests, true
+		return egressBlameStatus, http.StatusTooManyRequests
 	case errors.Is(err, errWebAntiBot):
-		return http.StatusForbidden, true
-	default:
-		return 0, false
+		return egressBlameStatus, http.StatusForbidden
+	}
+	if status, ok := provider.ErrorHTTPStatus(err); ok {
+		return egressBlameStatus, status
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		if closeErr.Code == websocket.CloseAbnormalClosure || closeErr.Code == websocket.CloseTLSHandshake {
+			// 没收到 close 帧就断了 —— 那是链路问题,不是上游在说话。
+			return egressBlameTransport, 0
+		}
+		switch reason := webResponseError(map[string]any{"message": closeErr.Text}); {
+		case errors.Is(reason, errWebUsageLimit):
+			return egressBlameStatus, http.StatusTooManyRequests
+		case errors.Is(reason, errWebAntiBot):
+			return egressBlameStatus, http.StatusForbidden
+		}
+		// 对端按协议正常收尾,理由我们不认识 —— 节点没做错任何事。
+		return egressBlameNone, 0
+	}
+	return egressBlameTransport, 0
+}
+
+// feedbackUpstreamError 是 web provider 唯一的出口反馈入口。
+//
+// 直接调用 a.egress.Feedback(ctx, nodeID, 0, err) 是本次事故的根源:那等于断言
+// "这是链路故障",而调用点往往拿到的是上游的应用层拒绝。归因交给
+// classifyEgressBlame,调用点只管把错误递过来。
+//
+// 注意状态码分支传的 transportErr 是 nil —— 有了状态码就必须走 manager 的状态码
+// 分支(401/429 豁免、403 只降健康度不冷却),再带上 err 会重新落回 default。
+func (a *Adapter) feedbackUpstreamError(ctx context.Context, nodeID uint64, err error) {
+	switch blame, status := classifyEgressBlame(err); blame {
+	case egressBlameStatus:
+		a.egress.Feedback(context.WithoutCancel(ctx), nodeID, status, nil)
+	case egressBlameTransport:
+		a.egress.Feedback(context.WithoutCancel(ctx), nodeID, 0, err)
 	}
 }

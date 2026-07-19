@@ -68,7 +68,7 @@ func (a *Adapter) downloadVideoAttempt(ctx context.Context, credential account.C
 	request.Header.Del("Content-Type")
 	response, err := lease.Do(request)
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.feedbackUpstreamError(ctx, lease.NodeID, err)
 		return "", ctx.Err() == nil, err
 	}
 	defer response.Body.Close()

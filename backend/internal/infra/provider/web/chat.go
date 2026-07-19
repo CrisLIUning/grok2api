@@ -227,7 +227,7 @@ func (a *Adapter) ForwardResponse(ctx context.Context, request provider.Response
 				a.feedbackAntiBot(ctx, lease, statsigTarget)
 				return antiBotProviderResponse(), nil
 			}
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, consumeErr)
+			a.feedbackUpstreamError(ctx, lease.NodeID, consumeErr)
 			return nil, consumeErr
 		}
 		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, http.StatusOK, nil)
@@ -348,7 +348,7 @@ func (a *Adapter) openChat(ctx context.Context, credential account.Credential, p
 	response, err := lease.Do(request)
 	if err != nil {
 		cancel()
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.feedbackUpstreamError(ctx, lease.NodeID, err)
 		lease.Release()
 		return nil, nil, nil, "", err
 	}
@@ -439,7 +439,7 @@ func (a *Adapter) streamOpenAIResponse(ctx context.Context, source io.ReadCloser
 			return writeWebStreamDelta(writer, messagesStream, operation, responseID, model, kind, delta)
 		})
 		if err != nil {
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+			a.feedbackUpstreamError(ctx, lease.NodeID, err)
 			_ = writer.CloseWithError(err)
 			return
 		}
@@ -939,12 +939,25 @@ func webResponseError(value map[string]any) error {
 	if message == "" {
 		message = "Grok Web stream error"
 	}
+	// Grok 用的是 gRPC 标准状态码:7 = PERMISSION_DENIED(被 anti-bot 拦下),
+	// 8 = RESOURCE_EXHAUSTED(配额/限流)。既有代码只认 7,补上 8 是把同一套
+	// 约定认全。
 	code, _ := numberAsInt(value["code"])
-	if code == 7 || strings.Contains(strings.ToLower(message), "anti-bot") {
+	normalized := strings.ToLower(message)
+	if code == 7 || strings.Contains(normalized, "anti-bot") {
 		return fmt.Errorf("%w: %s", errWebAntiBot, message)
 	}
-	normalized := strings.ToLower(message)
-	if strings.Contains(normalized, "usage limit") || strings.Contains(normalized, "usage quota") {
+	// 这张表是全仓唯一的上游错误词汇表 —— WS 帧、SSE 帧、出口归因都从它取
+	// "这是限流还是反机器人",漏一种说法对应的整条路径就静默失效。
+	// "too many requests" 不是推测:仓库里存着实际抓到的上游响应
+	// {"error":{"code":8,"message":"Too many requests"}}(见 sanitizeVideoFailure
+	// 的说明),它此前完全不被识别,于是被当成未知错误落进传输故障分支、冷却了
+	// 出口节点,同时换号重试也认不出该轮换。
+	if code == 8 ||
+		strings.Contains(normalized, "usage limit") ||
+		strings.Contains(normalized, "usage quota") ||
+		strings.Contains(normalized, "too many requests") ||
+		strings.Contains(normalized, "rate limit") {
 		return fmt.Errorf("%w: %s", errWebUsageLimit, message)
 	}
 	return errors.New(message)

@@ -620,12 +620,12 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 	_ = connection.SetReadDeadline(deadline)
 	_ = connection.SetWriteDeadline(deadline)
 	if err := connection.WriteJSON(imagineResetMessage()); err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.feedbackUpstreamError(ctx, lease.NodeID, err)
 		return nil, err
 	}
 	upstreamCount := imagineUpstreamGenerationCount(request.Streaming, count, modelConfig)
 	if err := connection.WriteJSON(imagineRequestMessage(newWebID("img"), request.Prompt, ratio, cfg.AllowNSFW, modelConfig.Pro, upstreamCount)); err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.feedbackUpstreamError(ctx, lease.NodeID, err)
 		return nil, err
 	}
 	if request.Streaming {
@@ -641,7 +641,7 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 	for collector.UsableCount() < count && !collector.Done(modelConfig.NativeBatchSize) {
 		messageType, data, readErr := connection.ReadMessage()
 		if readErr != nil {
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, readErr)
+			a.feedbackUpstreamError(ctx, lease.NodeID, readErr)
 			return nil, fmt.Errorf("读取 Imagine WebSocket: %w", readErr)
 		}
 		if messageType != websocket.TextMessage {
@@ -653,9 +653,7 @@ func (a *Adapter) generateWSImage(ctx context.Context, request provider.ImageGen
 		}
 		if message["type"] == "error" {
 			upstreamErr := imagineWSFrameError(message)
-			if status, report := imagineWSEgressStatus(upstreamErr); report {
-				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, nil)
-			}
+			a.feedbackUpstreamError(ctx, lease.NodeID, upstreamErr)
 			return nil, upstreamErr
 		}
 		collector.Accept(message)
@@ -899,14 +897,17 @@ func (a *Adapter) streamImageEdit(
 		return nil
 	})
 	if consumeErr != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, consumeErr)
+		a.feedbackUpstreamError(ctx, lease.NodeID, consumeErr)
 		_ = writer.CloseWithError(consumeErr)
 		return
 	}
 	urls := imageEditResultURLs(&parsed, capture.Bytes())
 	if len(urls) == 0 {
+		// 走到这里意味着上游回了 2xx 且整条流被完整读完(consumeErr == nil)——
+		// 出口节点把活干得好好的。结果为空通常是上游内容审核把图滤掉了,那是
+		// 上游的判断,不是链路问题。此前这里向 egress 上报,等于让一次内容审核
+		// 冷却一个完全健康的节点。
 		err := fmt.Errorf("上游未返回可用的编辑图片")
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
 		_ = writer.CloseWithError(err)
 		return
 	}
@@ -1453,7 +1454,7 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 				_ = writer.CloseWithError(ctx.Err())
 				return
 			}
-			a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, readErr)
+			a.feedbackUpstreamError(ctx, lease.NodeID, readErr)
 			_ = writer.CloseWithError(readErr)
 			return
 		}
@@ -1466,9 +1467,7 @@ func (a *Adapter) streamImagineImages(ctx context.Context, writer *io.PipeWriter
 		}
 		if message["type"] == "error" {
 			upstreamErr := imagineWSFrameError(message)
-			if status, report := imagineWSEgressStatus(upstreamErr); report {
-				a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, status, nil)
-			}
+			a.feedbackUpstreamError(ctx, lease.NodeID, upstreamErr)
 			_ = writer.CloseWithError(upstreamErr)
 			return
 		}
@@ -1604,7 +1603,7 @@ func (a *Adapter) downloadImageAttempt(ctx context.Context, credential account.C
 	request.Header.Del("Content-Type")
 	response, err := lease.Do(request)
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.feedbackUpstreamError(ctx, lease.NodeID, err)
 		return nil, ctx.Err() == nil, err
 	}
 	defer response.Body.Close()
@@ -1619,7 +1618,7 @@ func (a *Adapter) downloadImageAttempt(ctx context.Context, credential account.C
 	}
 	raw, err := io.ReadAll(io.LimitReader(response.Body, (32<<20)+1))
 	if err != nil {
-		a.egress.Feedback(context.WithoutCancel(ctx), lease.NodeID, 0, err)
+		a.feedbackUpstreamError(ctx, lease.NodeID, err)
 		return nil, ctx.Err() == nil, fmt.Errorf("读取图片内容: %w", err)
 	}
 	if len(raw) > 32<<20 {

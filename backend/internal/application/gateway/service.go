@@ -33,7 +33,7 @@ import (
 var (
 	// FORK DELTA:视频拓展要按 source_request_id/source_post_id 找源视频,
 	// 找不到时要给出可诊断的错误而不是泛化失败。上游无拓展能力,故无此错误。
-	ErrExtensionSourceNotFound = errors.New("拓展来源视频不存在或尚未完成")
+	ErrExtensionSourceNotFound    = errors.New("拓展来源视频不存在或尚未完成")
 	ErrModelNotFound              = errors.New("模型不存在或未启用")
 	ErrNoAvailableAccount         = errors.New("没有可用上游账号")
 	ErrResponseNotFound           = errors.New("Response 不存在或已过期")

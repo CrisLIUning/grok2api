@@ -346,11 +346,14 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	// (429/5xx)时 postId 尚不存在,什么都没提交。判据见 videoRotatableFailure。
 	attempts := 1
 	if blob.Operation != videoOperationExtension {
-		attempts = max(1, int(s.maxAttempts.Load()))
+		attempts = s.attemptBudget()
 	}
+	// 必须与 CreateVideo 取号时用的 quotaMode 一致:它决定候选集的缓存键、配额窗口
+	// 过滤,以及 lease.QuotaMode(失败时的配额对账与成功后的 weekly 刷新都看它)。
+	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
 	excluded := make(map[uint64]bool)
 	for attempt := 0; attempt < attempts; attempt++ {
-		lease, err := s.acquireVideoAccount(ctx, route, job.AccountID, attempt, excluded)
+		lease, err := s.acquireVideoAccount(ctx, route, job.AccountID, quotaMode, attempt, excluded)
 		if err != nil {
 			if parent.Err() != nil {
 				s.deferVideoJob(parent, job)
@@ -434,11 +437,11 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 //
 // 第一次尝试沿用任务入队时选定的账号(AcquirePinned);续拍永远只有这一次。
 // 后续尝试则从号池里另选,并排除已经失败过的账号。
-func (s *Service) acquireVideoAccount(ctx context.Context, route model.Route, pinnedAccountID uint64, attempt int, excluded map[uint64]bool) (*accountLease, error) {
+func (s *Service) acquireVideoAccount(ctx context.Context, route model.Route, pinnedAccountID uint64, quotaMode string, attempt int, excluded map[uint64]bool) (*accountLease, error) {
 	if attempt == 0 {
-		return s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.UpstreamModel, "", true)
+		return s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.UpstreamModel, quotaMode, true)
 	}
-	return s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, "", "", excluded, false)
+	return s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
 }
 
 // recordVideoAttemptFailure 把一次生成失败记到账号/配额账上。

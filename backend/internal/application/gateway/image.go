@@ -162,10 +162,7 @@ func (s *Service) executeImage(
 		}
 	}()
 	quotaMode := s.providers.QuotaMode(route.Provider, route.UpstreamModel)
-	attempts := int(s.maxAttempts.Load())
-	if attempts <= 0 {
-		attempts = 3
-	}
+	attempts := s.attemptBudget()
 	excluded := make(map[uint64]bool)
 	var lease *accountLease
 	var credential accountdomain.Credential

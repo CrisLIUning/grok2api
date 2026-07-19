@@ -11,6 +11,23 @@ import (
 // 换号重试 —— 拼错一个字母就是静默地允许续拍换号,然后 100% invalid-parent-post。
 const videoOperationExtension = "extension"
 
+// defaultUpstreamAttempts 是 maxAttempts 配置缺失/非法时的重试预算。
+const defaultUpstreamAttempts = 3
+
+// attemptBudget 返回本次请求的上游尝试次数。
+//
+// UpdateMaxAttempts 不校验入参,所以 0 / 负数是能落到运行时的(配置项没写、迁移
+// 出错、后台填错)。图片与视频此前各自兜底:图片 <=0 → 3,视频 max(1, n) → 1。
+// 后者意味着一个配置失误就静默关掉了视频的换号重试,而症状与修复前的 bug 完全
+// 一样——视频 429 直接判死,同一时刻同一号池的图片却能出片。那正是这次排查里
+// 最难辨认的信号,不能再留一个能重现它的开关。
+func (s *Service) attemptBudget() int {
+	if n := int(s.maxAttempts.Load()); n > 0 {
+		return n
+	}
+	return defaultUpstreamAttempts
+}
+
 // retryableOnAnotherAccount 判断一次上游失败是否值得换一个账号重试。
 //
 // 判据只有 429 与 5xx —— 它们表示"上游此刻不接",换个身份或时机有意义。
@@ -37,18 +54,23 @@ func retryableOnAnotherAccount(status int) bool {
 //     runVideoJob 原来那条"禁止切换账号"的注释对续拍是对的,错在被套用到了
 //     首次生成上。
 //
-//  2. **错误带得出上游状态码。** 这是能否重试的**证明**,不只是分类:携带状态码
-//     的视频错误只有 videoUpstreamError 一种,而它只在 parseVideoStream 读流
-//     之前的状态检查处构造(web/video.go:144)—— 那一刻 postId 还不存在,上游
-//     什么都没收下。反过来,mid-stream 的失败返回的是裸 fmt.Errorf,不带状态码;
-//     那时 post 可能已经创建,换号重试会产生第二个 post,既浪费配额又可能把
-//     同一次请求算两遍钱。
+//  2. **错误是明确的 429。** 这是能否重试的**证明**,不只是分类。
 //
-// 状态码本身的取舍与图片一致,见 retryableOnAnotherAccount。
+// 第二条比图片严格,刻意如此。图片是同步的,重试至多多花一次调用;视频不是:
+//
+//   - 429:明确的拒绝,上游什么都没收下 —— 安全。而它正是我们要解决的那个失败
+//     (catalog.go 的实测注释:「视频首发就是 429,换个号重试即成功」)。
+//   - 5xx:无法区分"上游拒绝了"和"上游已经开始生成、只是响应丢了"。后者换号
+//     会产生第二次生成:白烧一份上游配额,还在 Grok 那边留下孤儿 post。
+//   - 无状态码:mid-stream 的失败返回裸 fmt.Errorf,那时 post 可能已经创建,
+//     同上。
+//
+// 所以只认 429 —— 拿到了全部收益,完全避开重复生成。放宽它之前请先想清楚:
+// 你能证明上游没收下这次请求吗?
 func videoRotatableFailure(operation string, err error) bool {
 	if operation == videoOperationExtension {
 		return false
 	}
 	status, ok := provider.ErrorHTTPStatus(err)
-	return ok && retryableOnAnotherAccount(status)
+	return ok && status == http.StatusTooManyRequests
 }

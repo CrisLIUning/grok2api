@@ -43,10 +43,20 @@ func TestVideoRotatableFailure_InitialGenerationRotatesOnRateLimit(t *testing.T)
 	}
 }
 
-func TestVideoRotatableFailure_InitialGenerationRotatesOnServerError(t *testing.T) {
+// 视频比图片更严格:5xx **不**换号。
+//
+// 图片是同步的,失败就是失败,重试至多多花一次调用。视频不是 —— conversations/new
+// 回 5xx 时,我们无法区分"上游拒绝了"和"上游已经开始生成、只是响应丢了"。后者
+// 换号重试会产生第二次生成:白烧一份上游配额,还在 Grok 那边留下一个孤儿 post。
+//
+// 429 没有这个歧义:它是明确的拒绝,上游什么都没收下。而 429 恰恰是我们要解决的
+// 那个失败(catalog.go 的实测注释:「视频首发就是 429,换个号重试即成功」),
+// 所以只认 429 既拿到了全部收益,又完全避开了重复生成。
+func TestVideoRotatableFailure_ServerErrorsDoNotRotate(t *testing.T) {
 	for _, status := range []int{http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable} {
-		if !videoRotatableFailure("", &stubStatusError{status: status}) {
-			t.Errorf("首发遇到 %d 应可换号重试", status)
+		if videoRotatableFailure("", &stubStatusError{status: status}) {
+			t.Errorf("首发遇到 %d 不应换号:无法区分'上游拒绝'与'上游已开始生成但响应丢了',"+
+				"后者重试会产生第二次生成(白烧配额 + 孤儿 post)", status)
 		}
 	}
 }
@@ -57,7 +67,7 @@ func TestVideoRotatableFailure_InitialGenerationRotatesOnServerError(t *testing.
 // 账号的会话解析得了。换号的结果是 100% 的 invalid-parent-post,既救不了这次
 // 请求,还白白把另一个账号推进冷却。
 func TestVideoRotatableFailure_ExtensionNeverRotates(t *testing.T) {
-	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusInternalServerError} {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
 		if videoRotatableFailure("extension", &stubStatusError{status: status}) {
 			t.Errorf("续拍在 %d 下也不能换号:postId 归源账号所有,换号必然 invalid-parent-post", status)
 		}

@@ -16,6 +16,7 @@ import (
 	"github.com/chenyme/grok2api/backend/internal/domain/account"
 	domainegress "github.com/chenyme/grok2api/backend/internal/domain/egress"
 	infraegress "github.com/chenyme/grok2api/backend/internal/infra/egress"
+	"github.com/chenyme/grok2api/backend/internal/infra/provider/browserheaders"
 	"github.com/chenyme/grok2api/backend/internal/pkg/signerurl"
 	"golang.org/x/net/html"
 	"golang.org/x/sync/singleflight"
@@ -288,6 +289,10 @@ func fetchStatsigMetaContent(ctx context.Context, baseURL, token string, lease *
 	request.Header.Set("Sec-Fetch-Site", "same-origin")
 	request.Header.Set("Upgrade-Insecure-Requests", "1")
 	request.Header.Set("User-Agent", lease.UserAgent)
+	// 这是导航式文档请求，恰恰是 Cloudflare 最可能下发 JS 挑战的那一次。它不走
+	// applyAppHeaders，所以要单独补 Client Hints —— 否则整条链上只有它的指纹是
+	// "自称 Chrome 却不发 Sec-Ch-Ua"。
+	browserheaders.ApplyChromiumClientHints(request.Header, lease.UserAgent)
 	request.Header.Set("Cookie", infraegress.BuildSSOCookie(token, lease.CFCookies))
 	response, err := lease.Do(request)
 	if err != nil {

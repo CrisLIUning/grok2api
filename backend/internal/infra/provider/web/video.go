@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -90,11 +91,14 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	}
 	response, err := a.postJSON(ctx, cfg, lease, token, cfg.BaseURL+"/rest/app-chat/conversations/new", payload, time.Duration(cfg.VideoTimeoutSeconds)*time.Second)
 	if err != nil {
+		// postJSON 已对传输错误/403 做过出口反馈;这里只原样上抛。
 		return provider.VideoResult{}, err
 	}
 	result, postID, parseErr := parseVideoStream(response, request.Progress)
 	_ = response.Body.Close()
 	if parseErr != nil {
+		// 流内 code=7/8 或传输层失败必须回写出口健康,否则 403/限流会被误当成账号问题。
+		a.feedbackUpstreamError(ctx, lease.NodeID, parseErr)
 		return provider.VideoResult{}, parseErr
 	}
 	if result.URL == "" {
@@ -145,22 +149,32 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 	}
 	var result provider.VideoResult
 	var postID string
+	// accepted 表示流里已经出现 progress/postId —— 上游可能已经收下任务。
+	// 分类仍保留 429/403 状态码;是否换号由上层根据“是否可证明未收下”决定。
+	var accepted bool
 	handle := func(root map[string]any) (bool, error) {
 		if errorValue, ok := root["error"].(map[string]any); ok {
-			return false, fmt.Errorf("视频上游错误: %v", errorValue["message"])
+			return false, classifyVideoStreamError(errorValue, accepted)
 		}
 		if errorValue := nestedMap(root, "result", "response", "error"); errorValue != nil {
-			return false, fmt.Errorf("视频上游错误: %v", errorValue["message"])
+			return false, classifyVideoStreamError(errorValue, accepted)
 		}
 		stream := nestedMap(root, "result", "response", "streamingVideoGenerationResponse")
 		if stream != nil {
-			if value, ok := numberAsInt(stream["progress"]); ok && progress != nil {
-				progress(value)
+			if value, ok := numberAsInt(stream["progress"]); ok {
+				if value > 0 {
+					accepted = true
+				}
+				if progress != nil {
+					progress(value)
+				}
 			}
 			if value, _ := stream["videoPostId"].(string); value != "" {
 				postID = value
+				accepted = true
 			} else if value, _ := stream["videoId"].(string); value != "" {
 				postID = value
+				accepted = true
 			}
 			moderated, _ := stream["moderated"].(bool)
 			if moderated {
@@ -191,6 +205,29 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 		return provider.VideoResult{}, "", err
 	}
 	return result, postID, nil
+}
+
+
+// classifyVideoStreamError 把 HTTP 200 流内的 error 帧保留成带状态码的错误。
+//
+// 词汇表复用 webResponseError(code=7 anti-bot / code=8 too many requests)。
+// 未知内容策略错误不猜状态码,避免误触发换号。
+// accepted 仅用于注释/后续扩展:即便流中途才报 429,也先保留 429 语义给上层。
+func classifyVideoStreamError(errorValue map[string]any, accepted bool) error {
+	_ = accepted
+	err := webResponseError(errorValue)
+	switch {
+	case errors.Is(err, errWebUsageLimit):
+		return &webUpstreamError{status: http.StatusTooManyRequests, err: err}
+	case errors.Is(err, errWebAntiBot):
+		return &webUpstreamError{status: http.StatusForbidden, err: err}
+	default:
+		msg, _ := errorValue["message"].(string)
+		if strings.TrimSpace(msg) == "" {
+			msg = "视频上游错误"
+		}
+		return fmt.Errorf("视频上游错误: %s", msg)
+	}
 }
 
 func consumeVideoSSE(reader io.Reader, handle func(map[string]any) (bool, error)) error {

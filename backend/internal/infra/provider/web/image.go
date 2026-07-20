@@ -1354,6 +1354,8 @@ func (a *Adapter) postJSONWithReferer(ctx context.Context, cfg Config, lease *eg
 		response, err := lease.Do(request)
 		if err != nil {
 			cancel()
+			// 传输故障必须回写出口健康,否则坏代理会被误当成账号失败。
+			a.feedbackUpstreamError(ctx, lease.NodeID, err)
 			return nil, err
 		}
 		if response.StatusCode == http.StatusForbidden {

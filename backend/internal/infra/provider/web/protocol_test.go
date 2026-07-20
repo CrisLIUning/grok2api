@@ -1127,6 +1127,61 @@ func TestParseVideoStreamFixture(t *testing.T) {
 	}
 }
 
+
+func TestParseVideoStreamClassifiesInBandRateLimit(t *testing.T) {
+	fixture := "data: {\"error\":{\"code\":8,\"message\":\"Too many requests\",\"details\":[]}}\n"
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}
+	_, _, err := parseVideoStream(response, nil)
+	if !errors.Is(err, errWebUsageLimit) {
+		t.Fatalf("error = %v, want usage limit", err)
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
+	}
+}
+
+func TestParseVideoStreamClassifiesInBandAntiBot(t *testing.T) {
+	fixture := `{"result":{"response":{"error":{"code":7,"message":"Request rejected by anti-bot rules.","details":[]}}}}`
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}
+	_, _, err := parseVideoStream(response, nil)
+	if !errors.Is(err, errWebAntiBot) {
+		t.Fatalf("error = %v, want anti-bot", err)
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusForbidden {
+		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
+	}
+}
+
+
+func TestParseVideoStreamImageRateLimitMessageIs429(t *testing.T) {
+	// 生产实测:流内无 code=8,仅 message "You've hit your image rate limit..."
+	// 必须归为 429,否则 videoRotatableFailure 认不出可换号。
+	fixture := "data: {\"error\":{\"message\":\"You've hit your image rate limit. Please try again later.\"}}\n"
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}
+	_, _, err := parseVideoStream(response, nil)
+	if !errors.Is(err, errWebUsageLimit) {
+		t.Fatalf("error = %v, want usage limit", err)
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
+	}
+}
+
+func TestParseVideoStreamUnknownPolicyErrorHasNoStatus(t *testing.T) {
+	fixture := "data: {\"error\":{\"message\":\"prompt violates content policy\"}}\n"
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}
+	_, _, err := parseVideoStream(response, nil)
+	if err == nil {
+		t.Fatal("expected policy error")
+	}
+	if _, ok := provider.ErrorHTTPStatus(err); ok {
+		t.Fatalf("policy error must not invent HTTP status: %v", err)
+	}
+}
+
 func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {
 	response := &http.Response{StatusCode: http.StatusTooManyRequests, Body: io.NopCloser(strings.NewReader("limited"))}
 	_, _, err := parseVideoStream(response, nil)

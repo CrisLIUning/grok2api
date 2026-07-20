@@ -97,8 +97,12 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 	result, postID, parseErr := parseVideoStream(response, request.Progress)
 	_ = response.Body.Close()
 	if parseErr != nil {
-		// 流内 code=7/8 或传输层失败必须回写出口健康,否则 403/限流会被误当成账号问题。
-		a.feedbackUpstreamError(ctx, lease.NodeID, parseErr)
+		// 只对已识别的上游语义(429/403)或真传输/解析故障回写出口。
+		// 内容策略等无状态码业务错误绝不能 Feedback:classifyEgressBlame 会把裸
+		// fmt.Errorf 默认成 transport,冷却节点 —— 与 Imagine 事故同一类误伤。
+		if shouldFeedbackVideoParseError(parseErr) {
+			a.feedbackUpstreamError(ctx, lease.NodeID, parseErr)
+		}
 		return provider.VideoResult{}, parseErr
 	}
 	if result.URL == "" {
@@ -228,6 +232,29 @@ func classifyVideoStreamError(errorValue map[string]any, accepted bool) error {
 		}
 		return fmt.Errorf("视频上游错误: %s", msg)
 	}
+}
+
+// shouldFeedbackVideoParseError 决定 parseVideoStream 的失败要不要写出口健康。
+//
+// 有 HTTP 状态(含 429/403)或限流/反机器人语义 → 反馈。
+// classifyVideoStreamError 默认分支的"视频上游错误: ..."是无状态业务拒绝 → 不反馈,
+// 否则 classifyEgressBlame 会把裸 fmt.Errorf 当成 transport 冷却节点。
+// 其余(流读失败、JSON 解析失败等) → 反馈。
+func shouldFeedbackVideoParseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if _, ok := provider.ErrorHTTPStatus(err); ok {
+		return true
+	}
+	if errors.Is(err, errWebUsageLimit) || errors.Is(err, errWebAntiBot) {
+		return true
+	}
+	// 业务侧包装的无状态拒绝(内容策略等):不反馈。
+	if strings.HasPrefix(err.Error(), "视频上游错误") {
+		return false
+	}
+	return true
 }
 
 func consumeVideoSSE(reader io.Reader, handle func(map[string]any) (bool, error)) error {

@@ -1180,6 +1180,30 @@ func TestParseVideoStreamUnknownPolicyErrorHasNoStatus(t *testing.T) {
 	if _, ok := provider.ErrorHTTPStatus(err); ok {
 		t.Fatalf("policy error must not invent HTTP status: %v", err)
 	}
+	// 无状态业务错误绝不能 Feedback:会被 classifyEgressBlame 当成 transport 冷却节点。
+	if shouldFeedbackVideoParseError(err) {
+		t.Fatalf("policy parseErr must not feedback egress: %v", err)
+	}
+}
+
+func TestShouldFeedbackVideoParseError(t *testing.T) {
+	rateLimit := &webUpstreamError{status: http.StatusTooManyRequests, err: errWebUsageLimit}
+	antiBot := &webUpstreamError{status: http.StatusForbidden, err: errWebAntiBot}
+	if !shouldFeedbackVideoParseError(rateLimit) {
+		t.Fatal("429 must feedback")
+	}
+	if !shouldFeedbackVideoParseError(antiBot) {
+		t.Fatal("403 must feedback")
+	}
+	if !shouldFeedbackVideoParseError(fmt.Errorf("解析视频上游流: %w", io.ErrUnexpectedEOF)) {
+		t.Fatal("stream parse failure must feedback")
+	}
+	if shouldFeedbackVideoParseError(fmt.Errorf("视频上游错误: prompt violates content policy")) {
+		t.Fatal("policy error must not feedback")
+	}
+	if shouldFeedbackVideoParseError(nil) {
+		t.Fatal("nil must not feedback")
+	}
 }
 
 func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {

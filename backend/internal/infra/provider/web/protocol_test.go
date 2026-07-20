@@ -768,6 +768,46 @@ func TestChatModelsUseLowestSufficientTierFirst(t *testing.T) {
 	}
 }
 
+func TestVideoModelPrefersSuperFirst(t *testing.T) {
+	adapter := &Adapter{}
+	got := adapter.TierOrder("grok-imagine-video")
+	want := []account.WebTier{account.WebTierSuper, account.WebTierHeavy, account.WebTierBasic}
+	if !slices.Equal(got, want) {
+		t.Fatalf("video tier order = %v, want %v", got, want)
+	}
+}
+
+func TestParseVideoStreamTemporaryUnavailableUnsubmitted(t *testing.T) {
+	fixture := "data: {\"error\":{\"message\":\"Service temporarily unavailable. Please try again later.\"}}\n"
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}
+	_, _, err := parseVideoStream(response, nil)
+	if !provider.IsUnsubmittedVideoError(err) {
+		t.Fatalf("temporary unavailable must be Unsubmitted: %v", err)
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, ok = %v", status, ok)
+	}
+}
+
+func TestParseVideoStreamAcceptedRateLimitNotUnsubmitted(t *testing.T) {
+	// progress/postId 先出现,再 error → accepted,不可换号。
+	fixture := "data: {\"result\":{\"response\":{\"streamingVideoGenerationResponse\":{\"progress\":12,\"videoPostId\":\"post_1\"}}}}\n" +
+		"data: {\"error\":{\"code\":8,\"message\":\"Too many requests\",\"details\":[]}}\n"
+	response := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(fixture))}
+	_, _, err := parseVideoStream(response, nil)
+	if err == nil {
+		t.Fatal("expected rate limit error after accepted progress")
+	}
+	if provider.IsUnsubmittedVideoError(err) {
+		t.Fatalf("accepted-then-429 must NOT be Unsubmitted (would duplicate generation): %v", err)
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok || status != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
+	}
+}
+
 func TestOnlyChatModelsExposeRateLimitModes(t *testing.T) {
 	for _, spec := range Catalog() {
 		if spec.Capability == modeldomain.CapabilityChat {
@@ -1139,6 +1179,9 @@ func TestParseVideoStreamClassifiesInBandRateLimit(t *testing.T) {
 	if !ok || status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
 	}
+	if !provider.IsUnsubmittedVideoError(err) {
+		t.Fatalf("first-frame rate limit must be UnsubmittedVideoError: %v", err)
+	}
 }
 
 func TestParseVideoStreamClassifiesInBandAntiBot(t *testing.T) {
@@ -1189,8 +1232,11 @@ func TestParseVideoStreamUnknownPolicyErrorHasNoStatus(t *testing.T) {
 func TestShouldFeedbackVideoParseError(t *testing.T) {
 	rateLimit := &webUpstreamError{status: http.StatusTooManyRequests, err: errWebUsageLimit}
 	antiBot := &webUpstreamError{status: http.StatusForbidden, err: errWebAntiBot}
-	if !shouldFeedbackVideoParseError(rateLimit) {
-		t.Fatal("429 must feedback")
+	if shouldFeedbackVideoParseError(rateLimit) {
+		t.Fatal("429 must not feedback egress: application-layer rate limit")
+	}
+	if shouldFeedbackVideoParseError(provider.NewUnsubmittedVideoError(http.StatusTooManyRequests, rateLimit)) {
+		t.Fatal("Unsubmitted 429 must not feedback egress")
 	}
 	if !shouldFeedbackVideoParseError(antiBot) {
 		t.Fatal("403 must feedback")
@@ -1212,6 +1258,9 @@ func TestParseVideoStreamPreservesUpstreamStatus(t *testing.T) {
 	status, ok := provider.ErrorHTTPStatus(err)
 	if !ok || status != http.StatusTooManyRequests {
 		t.Fatalf("status = %d, ok = %v, err = %v", status, ok, err)
+	}
+	if !provider.IsUnsubmittedVideoError(err) {
+		t.Fatalf("HTTP 429 before stream must be UnsubmittedVideoError: %v", err)
 	}
 }
 

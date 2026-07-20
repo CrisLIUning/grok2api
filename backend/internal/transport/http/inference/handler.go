@@ -543,12 +543,14 @@ func (h *Handler) generateVideo(c *gin.Context) {
 			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频拓展不支持参考图;请去掉 image/reference_images")
 			return
 		}
-		if request.StartTime != nil {
-			startTime = *request.StartTime
-			if startTime < 0 {
-				writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "start_time 不能为负")
-				return
-			}
+		if request.StartTime == nil {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "视频拓展必须提供 start_time,且不能小于 2")
+			return
+		}
+		startTime = *request.StartTime
+		if startTime < 2 {
+			writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "start_time 必须 >= 2")
+			return
 		}
 	} else if prompt == "" && len(referenceURLs) == 0 {
 		writeOpenAIError(c, http.StatusBadRequest, "invalid_request", "文本生视频必须提供 prompt；图片生视频可以省略 prompt")
@@ -659,6 +661,8 @@ func officialVideoErrorCode(value string) string {
 		return "service_unavailable"
 	case "model_not_found":
 		return "invalid_argument"
+	case "rate_limited":
+		return "rate_limit_exceeded"
 	default:
 		return "internal_error"
 	}

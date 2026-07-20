@@ -129,7 +129,7 @@ func (s *Service) CreateVideo(ctx context.Context, input VideoInput) (media.Job,
 	var accountID uint64
 	var accountName string
 	if pinnedAccountID != 0 {
-		lease, acqErr := s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.UpstreamModel, quotaMode, false)
+		lease, acqErr := s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.UpstreamModel, quotaMode, true)
 		if acqErr != nil {
 			return media.Job{}, fmt.Errorf("%w: 拓展来源账号不可用: %w", ErrNoAvailableAccount, acqErr)
 		}
@@ -394,7 +394,7 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 				s.deferVideoJob(parent, job)
 				return
 			}
-			s.recordVideoAttemptFailure(lease, genErr)
+			s.recordVideoAttemptFailure(lease, route.UpstreamModel, genErr)
 			lease.Release()
 			// 还有预算、且能证明上游什么都没收下 → 换个账号重来。
 			if attempt+1 < attempts && videoRotatableFailure(blob.Operation, genErr) {
@@ -433,6 +433,11 @@ func (s *Service) runVideoJob(parent context.Context, job media.Job, route model
 	}
 }
 
+// videoRetryTierOrder 是换号重试时的档位预算:先吃 Basic 大池,再落到 Super/Heavy。
+// 首发选号走 adapter.TierOrder(视频 = Super→Heavy→Basic),避免 1799 Basic 把
+// 少量 Super 饿死;重试反过来,把压力摊到更宽的 Basic 池。
+var videoRetryTierOrder = []account.WebTier{account.WebTierBasic, account.WebTierSuper, account.WebTierHeavy}
+
 // acquireVideoAccount 取本次尝试要用的账号。
 //
 // 第一次尝试沿用任务入队时选定的账号(AcquirePinned);续拍永远只有这一次。
@@ -441,13 +446,14 @@ func (s *Service) acquireVideoAccount(ctx context.Context, route model.Route, pi
 	if attempt == 0 {
 		return s.selector.AcquirePinned(ctx, route.Provider, pinnedAccountID, route.UpstreamModel, quotaMode, true)
 	}
-	return s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false)
+	return s.selector.Acquire(ctx, route.Provider, route.UpstreamModel, quotaMode, "", excluded, false, videoRetryTierOrder)
 }
 
-// recordVideoAttemptFailure 把一次生成失败记到账号/配额账上。
+// recordVideoAttemptFailure 把一次生成失败记到账号/模型账上。
 //
-// 从 runVideoJob 里抽出来只是为了让重试循环读得懂,归因规则一字未改。
-func (s *Service) recordVideoAttemptFailure(lease *accountLease, err error) {
+// 视频 429 走模型级短阻断(MarkModelRateLimited),不调用账号级 MarkFailure ——
+// 否则 chat auto/fast 会跟着进冷却,续拍源账号也会被整号踢出号池。
+func (s *Service) recordVideoAttemptFailure(lease *accountLease, upstreamModel string, err error) {
 	failureCtx, failureCancel := context.WithTimeout(context.Background(), finalizationTimeout)
 	defer failureCancel()
 	failureHandled := false
@@ -462,6 +468,10 @@ func (s *Service) recordVideoAttemptFailure(lease *accountLease, err error) {
 		case status == http.StatusForbidden && s.providers.RetryForbiddenAsEgress(lease.Credential.Provider):
 			// Web Provider 已对 anti-bot 403 降低出口健康并重建浏览器会话;
 			// 这是出口身份问题而非账号问题,不能误伤账号池。
+			failureHandled = true
+		case status == http.StatusTooManyRequests && lease.QuotaMode == "":
+			// 视频无远程配额窗口:429 隔离到该上游模型 10 分钟,chat 不受影响。
+			s.selector.MarkModelRateLimited(failureCtx, lease.Credential, upstreamModel)
 			failureHandled = true
 		case (status == http.StatusPaymentRequired || status == http.StatusTooManyRequests) && lease.QuotaMode != "":
 			exhausted, reconcileErr := s.accounts.ReconcileRateLimit(failureCtx, lease.Credential.ID, lease.QuotaMode, 0)
@@ -646,7 +656,9 @@ func sanitizeVideoFailure(err error) (string, error) {
 	if errors.Is(err, provider.ErrUnauthorized) {
 		return "provider_unavailable", errors.New("上游账号暂不可用,请稍后重试")
 	}
-	if status == http.StatusTooManyRequests {
+	// 可证明未提交的 429/503(含流内 temporary unavailable)都按限流公开,
+	// 客户端应退避重试,而不是当成参数/内容错误。
+	if status == http.StatusTooManyRequests || (provider.IsUnsubmittedVideoError(err) && status == http.StatusServiceUnavailable) {
 		return "rate_limited", errors.New("上游繁忙,请稍后重试")
 	}
 	return "provider_unavailable", errors.New("上游服务暂不可用,请稍后重试")

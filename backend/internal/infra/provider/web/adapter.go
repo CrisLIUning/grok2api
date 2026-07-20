@@ -114,6 +114,11 @@ func (a *Adapter) TierOrder(upstreamModel string) []account.WebTier {
 	if !ok {
 		return nil
 	}
+	// 视频首发优先 Super/Heavy:Basic 池极大时会把少量付费号饿死,实测 Super 成功率更高。
+	// 换号重试由 gateway 覆盖为 Basic→Super→Heavy,见 videoRetryTierOrder。
+	if spec.Capability == modeldomain.CapabilityVideo {
+		return []account.WebTier{account.WebTierSuper, account.WebTierHeavy, account.WebTierBasic}
+	}
 	switch spec.MinimumTier {
 	case account.WebTierHeavy:
 		return []account.WebTier{account.WebTierHeavy}

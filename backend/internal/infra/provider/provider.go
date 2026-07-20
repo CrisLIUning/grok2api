@@ -80,6 +80,57 @@ func IsMediaPostProcessingError(err error) bool {
 	return errors.As(err, &target)
 }
 
+// UnsubmittedVideoError 表示视频生成提交可证明尚未发生。
+//
+// 只有 provider 有资格构造它:网关靠类型本身决定是否允许跨账号重提,
+// 不能再根据裸 HTTP 状态码猜测“上游是否已收下任务”。
+// Status 只描述上游语义(如 429/503),是否可换号由本类型存在与否证明。
+type UnsubmittedVideoError struct {
+	Status int
+	Cause  error
+}
+
+func (e *UnsubmittedVideoError) Error() string {
+	if e == nil {
+		return "unsubmitted video rejection"
+	}
+	if e.Cause != nil {
+		return e.Cause.Error()
+	}
+	if e.Status > 0 {
+		return fmt.Sprintf("unsubmitted video rejection: HTTP %d", e.Status)
+	}
+	return "unsubmitted video rejection"
+}
+
+func (e *UnsubmittedVideoError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+func (e *UnsubmittedVideoError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.Status
+}
+
+// NewUnsubmittedVideoError 标记一次可证明未提交的视频拒绝。
+func NewUnsubmittedVideoError(status int, cause error) error {
+	if cause == nil {
+		return nil
+	}
+	return &UnsubmittedVideoError{Status: status, Cause: cause}
+}
+
+// IsUnsubmittedVideoError 判断错误是否证明视频生成尚未提交。
+func IsUnsubmittedVideoError(err error) bool {
+	var target *UnsubmittedVideoError
+	return errors.As(err, &target)
+}
+
 // CredentialRefreshError 区分需要重新认证的永久 OAuth 错误与可后台退避重试的临时错误。
 type CredentialRefreshError struct {
 	Status     int

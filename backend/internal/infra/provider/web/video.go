@@ -63,7 +63,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		for _, rawReference := range request.ReferenceURLs {
 			uploaded, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
 			if referenceErr != nil {
-				return provider.VideoResult{}, referenceErr
+				return provider.VideoResult{}, wrapUnsubmittedVideoPreflight(referenceErr)
 			}
 			if uploaded.ID != "" {
 				fileAttachments = append(fileAttachments, uploaded.ID)
@@ -75,7 +75,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		for _, rawReference := range request.ReferenceURLs {
 			uploaded, referenceErr := a.prepareVideoReference(ctx, cfg, lease, token, rawReference)
 			if referenceErr != nil {
-				return provider.VideoResult{}, referenceErr
+				return provider.VideoResult{}, wrapUnsubmittedVideoPreflight(referenceErr)
 			}
 			uploads = append(uploads, uploaded)
 		}
@@ -84,7 +84,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 			// 文生视频:建 video 种子 post 作 parentPostId。图生视频用 fileAttachments+rootPostId,不建 post。
 			parentID, err = a.createMediaPost(ctx, cfg, lease, token, "MEDIA_POST_TYPE_VIDEO", "", request.Prompt)
 			if err != nil {
-				return provider.VideoResult{}, err
+				return provider.VideoResult{}, wrapUnsubmittedVideoPreflight(err)
 			}
 		}
 		payload = videoCreatePayload(request.Prompt, parentID, ratio, resolution, segments[0], uploads)
@@ -100,6 +100,7 @@ func (a *Adapter) GenerateVideo(ctx context.Context, request provider.VideoReque
 		// 只对已识别的上游语义(429/403)或真传输/解析故障回写出口。
 		// 内容策略等无状态码业务错误绝不能 Feedback:classifyEgressBlame 会把裸
 		// fmt.Errorf 默认成 transport,冷却节点 —— 与 Imagine 事故同一类误伤。
+		// 可证明未提交的 429/503 是上游应用层拒绝,也不能罚出口。
 		if shouldFeedbackVideoParseError(parseErr) {
 			a.feedbackUpstreamError(ctx, lease.NodeID, parseErr)
 		}
@@ -143,35 +144,35 @@ func (a *Adapter) prepareVideoReference(ctx context.Context, cfg Config, lease *
 	return uploaded, nil
 }
 
+const videoServiceTemporarilyUnavailable = "Service temporarily unavailable. Please try again later."
+
 func parseVideoStream(response *http.Response, progress func(int)) (provider.VideoResult, string, error) {
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		body, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
 		if response.StatusCode == http.StatusUnauthorized {
 			return provider.VideoResult{}, "", provider.ErrUnauthorized
 		}
-		return provider.VideoResult{}, "", &videoUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
+		// 明确 429 是请求拒绝,conversations/new 尚未进入生成流 → 可证明未提交。
+		// 普通 5xx 不能包装:无法排除已提交后响应链路失败。
+		upstreamErr := &videoUpstreamError{status: response.StatusCode, body: strings.TrimSpace(string(body))}
+		if response.StatusCode == http.StatusTooManyRequests {
+			return provider.VideoResult{}, "", provider.NewUnsubmittedVideoError(http.StatusTooManyRequests, upstreamErr)
+		}
+		return provider.VideoResult{}, "", upstreamErr
 	}
 	var result provider.VideoResult
 	var postID string
 	// accepted 表示流里已经出现 progress/postId —— 上游可能已经收下任务。
-	// 分类仍保留 429/403 状态码;是否换号由上层根据“是否可证明未收下”决定。
+	// 本地 job.Progress=1 是 gateway 写入的初始值,不参与这里的判定。
+	// 分类仍保留 429/403 状态码;是否换号由 UnsubmittedVideoError 类型证明。
 	var accepted bool
 	handle := func(root map[string]any) (bool, error) {
-		if errorValue, ok := root["error"].(map[string]any); ok {
-			return false, classifyVideoStreamError(errorValue, accepted)
-		}
-		if errorValue := nestedMap(root, "result", "response", "error"); errorValue != nil {
-			return false, classifyVideoStreamError(errorValue, accepted)
-		}
+		// 同帧若同时有 progress/postId 和 error,先标记 accepted 再分类,
+		// 避免“已收下却被当成可换号”。
 		stream := nestedMap(root, "result", "response", "streamingVideoGenerationResponse")
 		if stream != nil {
-			if value, ok := numberAsInt(stream["progress"]); ok {
-				if value > 0 {
-					accepted = true
-				}
-				if progress != nil {
-					progress(value)
-				}
+			if value, ok := numberAsInt(stream["progress"]); ok && value > 0 {
+				accepted = true
 			}
 			if value, _ := stream["videoPostId"].(string); value != "" {
 				postID = value
@@ -179,6 +180,19 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 			} else if value, _ := stream["videoId"].(string); value != "" {
 				postID = value
 				accepted = true
+			}
+		}
+		if errorValue, ok := root["error"].(map[string]any); ok {
+			return false, classifyVideoStreamError(errorValue, accepted)
+		}
+		if errorValue := nestedMap(root, "result", "response", "error"); errorValue != nil {
+			return false, classifyVideoStreamError(errorValue, accepted)
+		}
+		if stream != nil {
+			if value, ok := numberAsInt(stream["progress"]); ok {
+				if progress != nil {
+					progress(value)
+				}
 			}
 			moderated, _ := stream["moderated"].(bool)
 			if moderated {
@@ -211,18 +225,23 @@ func parseVideoStream(response *http.Response, progress func(int)) (provider.Vid
 	return result, postID, nil
 }
 
-
 // classifyVideoStreamError 把 HTTP 200 流内的 error 帧保留成带状态码的错误。
 //
 // 词汇表复用 webResponseError(code=7 anti-bot / code=8 too many requests)。
 // 未知内容策略错误不猜状态码,避免误触发换号。
-// accepted 仅用于注释/后续扩展:即便流中途才报 429,也先保留 429 语义给上层。
+//
+// accepted=false 时,明确的限流/临时不可用包装为 UnsubmittedVideoError,
+// 证明上游尚未收下任务,网关可安全换号;accepted=true 时只保留状态码语义,
+// 绝不带 Unsubmitted 类型,避免重复生成。
 func classifyVideoStreamError(errorValue map[string]any, accepted bool) error {
-	_ = accepted
 	err := webResponseError(errorValue)
 	switch {
 	case errors.Is(err, errWebUsageLimit):
-		return &webUpstreamError{status: http.StatusTooManyRequests, err: err}
+		wrapped := &webUpstreamError{status: http.StatusTooManyRequests, err: err}
+		if !accepted {
+			return provider.NewUnsubmittedVideoError(http.StatusTooManyRequests, wrapped)
+		}
+		return wrapped
 	case errors.Is(err, errWebAntiBot):
 		return &webUpstreamError{status: http.StatusForbidden, err: err}
 	default:
@@ -230,13 +249,38 @@ func classifyVideoStreamError(errorValue map[string]any, accepted bool) error {
 		if strings.TrimSpace(msg) == "" {
 			msg = "视频上游错误"
 		}
+		// 只认线上实测的精确文案,不做 "temporarily"/"try again" 模糊匹配,
+		// 防止把内容策略或参数错误误判成可重试。
+		if !accepted && strings.TrimSpace(msg) == videoServiceTemporarilyUnavailable {
+			return provider.NewUnsubmittedVideoError(http.StatusServiceUnavailable, fmt.Errorf("视频上游错误: %s", msg))
+		}
 		return fmt.Errorf("视频上游错误: %s", msg)
+	}
+}
+
+// wrapUnsubmittedVideoPreflight 把生成端点之前的明确 429/503 包装成可证明未提交。
+// createMediaPost / 参考图上传发生在 conversations/new 之前,不可能重复生成视频。
+// 图片路径共享 createMediaPost,因此包装只在 GenerateVideo 边界做。
+func wrapUnsubmittedVideoPreflight(err error) error {
+	if err == nil || provider.IsUnsubmittedVideoError(err) {
+		return err
+	}
+	status, ok := provider.ErrorHTTPStatus(err)
+	if !ok {
+		return err
+	}
+	switch status {
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+		return provider.NewUnsubmittedVideoError(status, err)
+	default:
+		return err
 	}
 }
 
 // shouldFeedbackVideoParseError 决定 parseVideoStream 的失败要不要写出口健康。
 //
 // 有 HTTP 状态(含 429/403)或限流/反机器人语义 → 反馈。
+// 可证明未提交的 429/503 是上游应用层拒绝 → 不反馈,避免误冷出口。
 // classifyVideoStreamError 默认分支的"视频上游错误: ..."是无状态业务拒绝 → 不反馈,
 // 否则 classifyEgressBlame 会把裸 fmt.Errorf 当成 transport 冷却节点。
 // 其余(流读失败、JSON 解析失败等) → 反馈。
@@ -244,7 +288,15 @@ func shouldFeedbackVideoParseError(err error) bool {
 	if err == nil {
 		return false
 	}
-	if _, ok := provider.ErrorHTTPStatus(err); ok {
+	// 可证明未提交的限流/临时不可用:节点把消息送达了,不该罚。
+	if provider.IsUnsubmittedVideoError(err) {
+		return false
+	}
+	if status, ok := provider.ErrorHTTPStatus(err); ok {
+		// 429 是上游应用层限流,不是出口故障。
+		if status == http.StatusTooManyRequests {
+			return false
+		}
 		return true
 	}
 	if errors.Is(err, errWebUsageLimit) || errors.Is(err, errWebAntiBot) {

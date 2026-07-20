@@ -141,9 +141,13 @@ func (s *Selector) routingConfig() (time.Duration, time.Duration, time.Duration,
 	return s.stickyTTL, s.cooldownBase, s.cooldownMax, s.capacityWait
 }
 
-func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool) (*accountLease, error) {
+func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstreamModel, quotaMode, affinityKey string, excluded map[uint64]bool, allowQuotaProbe bool, preferredTiers ...[]account.WebTier) (*accountLease, error) {
 	now := time.Now().UTC()
 	stickyKey := stickySessionKey(affinityKey)
+	tierOrder := s.resolveTierOrder(provider, upstreamModel)
+	if len(preferredTiers) > 0 && len(preferredTiers[0]) > 0 {
+		tierOrder = preferredTiers[0]
+	}
 	values, err := s.loadCandidates(ctx, provider, upstreamModel, quotaMode, now)
 	if err != nil {
 		return nil, err
@@ -216,7 +220,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 		return nil, &SelectionUnavailableError{Reason: reason, RetryAfter: retryDelay(now, earliestRetry)}
 	}
 	if len(probeCandidates) > 0 {
-		plan, err := s.planCandidates(ctx, probeCandidates, now, s.resolveTierOrder(provider, upstreamModel))
+		plan, err := s.planCandidates(ctx, probeCandidates, now, tierOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -278,7 +282,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	// 粘性账号仅因并发满载而暂时不可用时，先等待该账号；超时后允许本次请求临时借用
 	// 其他账号，但不覆盖原绑定，避免并行请求让活跃会话在账号池中来回抖动。
 	if saturatedStickyID != 0 {
-		plan, err := s.planCandidates(ctx, normalCandidates, time.Now().UTC(), s.resolveTierOrder(provider, upstreamModel))
+		plan, err := s.planCandidates(ctx, normalCandidates, time.Now().UTC(), tierOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -303,7 +307,7 @@ func (s *Selector) Acquire(ctx context.Context, provider account.Provider, upstr
 	waitDeadline := time.Now().Add(capacityWait)
 	for {
 		currentTime := time.Now().UTC()
-		plan, err := s.planCandidates(ctx, normalCandidates, currentTime, s.resolveTierOrder(provider, upstreamModel))
+		plan, err := s.planCandidates(ctx, normalCandidates, currentTime, tierOrder)
 		if err != nil {
 			return nil, err
 		}
@@ -511,6 +515,25 @@ func (s *Selector) MarkModelQuotaExhausted(ctx context.Context, credential accou
 	until := time.Now().UTC().Add(retryAfter)
 	_ = s.accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{
 		AccountID: credential.ID, UpstreamModel: upstreamModel, Reason: "model_quota_depleted", CooldownUntil: until, UpdatedAt: time.Now().UTC(),
+	})
+	s.invalidateCandidates(credential.Provider)
+}
+
+// videoModelRateLimitCooldown 是视频 429 的模型级短阻断。
+// 不伪造上游 Retry-After,也不用 24h 配额耗尽语义 —— 只让该模型暂时离开候选池。
+const videoModelRateLimitCooldown = 10 * time.Minute
+
+// MarkModelRateLimited 把视频限流隔离到目标上游模型,不冷却整个账号。
+// chat auto/fast 等其他能力仍可 Acquire;续拍若 pin 到被阻断的源账号则返回 SelectionModelCooling。
+func (s *Selector) MarkModelRateLimited(ctx context.Context, credential account.Credential, upstreamModel string) {
+	upstreamModel = strings.TrimSpace(upstreamModel)
+	if upstreamModel == "" {
+		return
+	}
+	now := time.Now().UTC()
+	_ = s.accounts.UpsertModelQuotaBlock(ctx, account.ModelQuotaBlock{
+		AccountID: credential.ID, UpstreamModel: upstreamModel, Reason: "video_rate_limited",
+		CooldownUntil: now.Add(videoModelRateLimitCooldown), UpdatedAt: now,
 	})
 	s.invalidateCandidates(credential.Provider)
 }

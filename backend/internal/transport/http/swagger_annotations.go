@@ -69,7 +69,7 @@ type SwaggerVideoGenerationRequest struct {
 	SourceRequestID string `json:"source_request_id,omitempty" example:"video_D2dFBlN_tLOHyL8hQSxjpxbt"`
 	// source_post_id 为裸 grok videoPostId(高级用法,该 post 必须属于被选中的账号,否则多账号池大概率 403)。
 	SourcePostID string `json:"source_post_id,omitempty" example:"59d40158-a320-46eb-b651-a93084a91044"`
-	// 从源视频的第几秒(帧)开始拓展。
+	// 从源视频的第几秒(帧)开始拓展;extension 时必填且必须 >= 2。
 	StartTime float64 `json:"start_time,omitempty" example:"4"`
 }
 

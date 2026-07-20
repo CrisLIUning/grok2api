@@ -108,7 +108,7 @@ export async function createVideo(input: {
     body.operation = "extension";
     if (input.sourceRequestId) body.source_request_id = input.sourceRequestId;
     if (input.sourcePostId) body.source_post_id = input.sourcePostId;
-    body.start_time = input.startTime ?? 0;
+    body.start_time = input.startTime ?? 2;
   } else if (input.imageURL) {
     body.image = { url: input.imageURL };
   }

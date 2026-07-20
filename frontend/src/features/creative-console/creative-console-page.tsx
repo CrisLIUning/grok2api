@@ -338,7 +338,7 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   const [resolution, setResolution] = useState("720p");
   const [showOptions, setShowOptions] = useState(false);
   const [sourceRequestId, setSourceRequestId] = useState("");
-  const [startTime, setStartTime] = useState("0");
+  const [startTime, setStartTime] = useState("2");
   const [sourceVideoURL, setSourceVideoURL] = useState("");
   const sourceVideoRef = useRef<HTMLVideoElement>(null);
   const [job, setJob] = useState<{ requestId: string; apiKey: string } | null>(null);
@@ -394,7 +394,7 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
     setVideoOp("extend");
     setSourceRequestId(job.requestId);
     setSourceVideoURL(statusQuery.data?.video?.url ?? "");
-    setStartTime("0");
+    setStartTime("2");
     setPrompt("");
     setShowOptions(true);
     setJob(null);
@@ -404,7 +404,7 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
   function useCurrentFrame(): void {
     const current = sourceVideoRef.current?.currentTime;
     if (typeof current === "number" && Number.isFinite(current)) {
-      setStartTime(String(Math.max(0, Math.round(current * 10) / 10)));
+      setStartTime(String(Math.max(2, Math.round(current * 10) / 10)));
     }
   }
 
@@ -434,7 +434,7 @@ function VideoPanel({ apiKey, model, modelOptions, onModelChange }: CreativePane
               <div className="space-y-2 border-b border-border/50 bg-secondary/20 p-3">
                 <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_8rem]">
                   <Input id="video-source" type="text" className="border-transparent bg-background/70 font-mono text-xs shadow-none" value={sourceRequestId} onChange={(event) => setSourceRequestId(event.target.value)} placeholder={t("creativeConsole.sourceRequestId")} aria-label={t("creativeConsole.sourceRequestId")} />
-                  <Input id="video-start" type="number" className="border-transparent bg-background/70 shadow-none" min={0} step={0.1} value={startTime} onChange={(event) => setStartTime(event.target.value)} aria-label={t("creativeConsole.startTime")} placeholder={t("creativeConsole.startTime")} />
+                  <Input id="video-start" type="number" className="border-transparent bg-background/70 shadow-none" min={2} step={0.1} value={startTime} onChange={(event) => setStartTime(event.target.value)} aria-label={t("creativeConsole.startTime")} placeholder={t("creativeConsole.startTime")} />
                 </div>
                 {sourceVideoURL ? (
                   <div className="space-y-2">

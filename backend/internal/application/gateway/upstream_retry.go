@@ -51,26 +51,17 @@ func retryableOnAnotherAccount(status int) bool {
 //  1. **不是续拍。** extendPostId 与 originalPostId / parentPostId 是同一个
 //     post,只有创建它的账号的会话解析得了;换号是 100% 的
 //     invalid-parent-post,救不了这次请求,还白白把另一个账号推进冷却。
-//     runVideoJob 原来那条"禁止切换账号"的注释对续拍是对的,错在被套用到了
-//     首次生成上。
 //
-//  2. **错误是明确的 429。** 这是能否重试的**证明**,不只是分类。
+//  2. **错误是 UnsubmittedVideoError。** 只有 provider 能证明"生成尚未提交":
+//     首帧 429/usage-limit、首帧精确的 Service temporarily unavailable、
+//     或 createMediaPost/参考图上传的明确 429/503。裸 HTTP 429 不够 ——
+//     流中途 accepted 后的 429 仍带 429 状态码,但已可能收下任务,换号会
+//     产生第二份视频。
 //
-// 第二条比图片严格,刻意如此。图片是同步的,重试至多多花一次调用;视频不是:
-//
-//   - 429:明确的拒绝,上游什么都没收下 —— 安全。而它正是我们要解决的那个失败
-//     (catalog.go 的实测注释:「视频首发就是 429,换个号重试即成功」)。
-//   - 5xx:无法区分"上游拒绝了"和"上游已经开始生成、只是响应丢了"。后者换号
-//     会产生第二次生成:白烧一份上游配额,还在 Grok 那边留下孤儿 post。
-//   - 无状态码:mid-stream 的失败返回裸 fmt.Errorf,那时 post 可能已经创建,
-//     同上。
-//
-// 所以只认 429 —— 拿到了全部收益,完全避开重复生成。放宽它之前请先想清楚:
-// 你能证明上游没收下这次请求吗?
+// 放宽它之前请先想清楚:你能证明上游没收下这次请求吗?
 func videoRotatableFailure(operation string, err error) bool {
 	if operation == videoOperationExtension {
 		return false
 	}
-	status, ok := provider.ErrorHTTPStatus(err)
-	return ok && status == http.StatusTooManyRequests
+	return provider.IsUnsubmittedVideoError(err)
 }

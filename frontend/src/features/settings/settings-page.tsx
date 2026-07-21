@@ -29,6 +29,8 @@ export function SettingsPage() {
   const loading = settingsQuery.isPending;
   const statsigMode = form.watch("providerWeb.statsigMode");
   const statsigManualConfigured = form.watch("providerWeb.statsigManualConfigured");
+  const draftClearanceMode = form.watch("providerWeb.clearanceMode");
+  const activeClearanceMode = snapshot?.config.providerWeb.clearanceMode ?? draftClearanceMode ?? "manual";
   const buildClientVersion = form.watch("providerBuild.clientVersion");
   const buildUserAgent = form.watch("providerBuild.userAgent");
   const recommendedBuild = snapshot?.recommendedProviderBuild;
@@ -160,8 +162,26 @@ export function SettingsPage() {
             </div>
           </SettingsSection>
 
+          <SettingsSection title={t("settings.egress.clearance")}>
+            <div className="grid gap-x-4 gap-y-5 sm:grid-cols-2">
+              <SettingsField controlId="egress-clearance-mode" className="sm:col-span-2" label={t("settings.web.clearanceMode")} description={t("settings.web.clearanceModeHelp")} error={form.formState.errors.providerWeb?.clearanceMode?.message}>
+                <Controller control={form.control} name="providerWeb.clearanceMode" render={({ field }) => (
+                  <div className="flex gap-2">
+                    <Button type="button" role="radio" size="sm" variant={field.value === "manual" ? "secondary" : "ghost"} className="h-7 text-xs shadow-none" aria-checked={field.value === "manual"} onClick={() => field.onChange("manual")}>{t("settings.web.clearanceManual")}</Button>
+                    <Button type="button" role="radio" size="sm" variant={field.value === "flaresolverr" ? "secondary" : "ghost"} className="h-7 text-xs shadow-none" aria-checked={field.value === "flaresolverr"} onClick={() => field.onChange("flaresolverr")}>{t("settings.web.clearanceFlareSolverr")}</Button>
+                  </div>
+                )} />
+              </SettingsField>
+              {draftClearanceMode === "flaresolverr" ? <>
+                <SettingsField controlId="egress-flaresolverr-url" className="sm:col-span-2" label={t("settings.web.flareSolverrURL")} description={t("settings.web.flareSolverrURLHelp")} error={form.formState.errors.providerWeb?.flareSolverrURL?.message}><Input id="egress-flaresolverr-url" type="url" placeholder="http://flaresolverr:8191" {...form.register("providerWeb.flareSolverrURL")} /></SettingsField>
+                <SettingsField controlId="egress-clearance-timeout" label={t("settings.web.clearanceTimeout")} description={t("settings.web.clearanceTimeoutHelp")} error={form.formState.errors.providerWeb?.clearanceTimeout?.message}><Controller control={form.control} name="providerWeb.clearanceTimeout" render={({ field }) => <DurationInput id="egress-clearance-timeout" value={field.value} onChange={field.onChange} />} /></SettingsField>
+                <SettingsField controlId="egress-clearance-refresh" label={t("settings.web.clearanceRefresh")} description={t("settings.web.clearanceRefreshHelp")} error={form.formState.errors.providerWeb?.clearanceRefresh?.message}><Controller control={form.control} name="providerWeb.clearanceRefresh" render={({ field }) => <DurationInput id="egress-clearance-refresh" value={field.value} onChange={field.onChange} />} /></SettingsField>
+              </> : null}
+            </div>
+          </SettingsSection>
+
           <SettingsSection title={t("settings.egress.title")} wide>
-            <EgressNodes />
+            <EgressNodes clearanceMode={activeClearanceMode} />
           </SettingsSection>
           </SettingsPane>
 

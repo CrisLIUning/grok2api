@@ -39,14 +39,20 @@ type ProviderWebConfig struct {
 	StatsigManualValue      string
 	StatsigManualConfigured bool
 	StatsigSignerURL        string
-	QuotaTimeout            string
-	ChatTimeout             string
-	ImageTimeout            string
-	VideoTimeout            string
-	MediaConcurrency        int
-	AllowNSFW               bool
-	RecoveryBackoffBase     string
-	RecoveryBackoffMax      string
+	ClearanceMode           string
+	FlareSolverrURL         string
+	ClearanceTimeout        string
+	ClearanceRefresh        string
+	// ClearanceProvided distinguishes older admin clients that predate clearance fields.
+	ClearanceProvided bool
+	QuotaTimeout        string
+	ChatTimeout         string
+	ImageTimeout        string
+	VideoTimeout        string
+	MediaConcurrency    int
+	AllowNSFW           bool
+	RecoveryBackoffBase string
+	RecoveryBackoffMax  string
 }
 
 type ProviderConsoleConfig struct {
@@ -264,9 +270,27 @@ func applyDomainConfig(base config.Config, value settingsdomain.Config) config.C
 		ClientIdentifier: value.ProviderBuild.ClientIdentifier, TokenAuth: value.ProviderBuild.TokenAuth,
 		UserAgent: value.ProviderBuild.UserAgent,
 	}
-	base.Provider.Web = config.WebProviderConfig{
+	clearanceMode := strings.TrimSpace(value.ProviderWeb.ClearanceMode)
+		if clearanceMode == "" {
+			clearanceMode = base.Provider.Web.ClearanceMode
+		}
+		flareSolverrURL := strings.TrimSpace(value.ProviderWeb.FlareSolverrURL)
+		if flareSolverrURL == "" {
+			flareSolverrURL = base.Provider.Web.FlareSolverrURL
+		}
+		clearanceTimeout := value.ProviderWeb.ClearanceTimeout
+		if clearanceTimeout <= 0 {
+			clearanceTimeout = base.Provider.Web.ClearanceTimeout.Value()
+		}
+		clearanceRefresh := value.ProviderWeb.ClearanceRefresh
+		if clearanceRefresh <= 0 {
+			clearanceRefresh = base.Provider.Web.ClearanceRefresh.Value()
+		}
+		base.Provider.Web = config.WebProviderConfig{
 		BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: config.Duration(value.ProviderWeb.QuotaTimeout),
 		StatsigMode: value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
+			ClearanceMode: clearanceMode, FlareSolverrURL: flareSolverrURL,
+			ClearanceTimeout: config.Duration(clearanceTimeout), ClearanceRefresh: config.Duration(clearanceRefresh),
 		ChatTimeout: config.Duration(value.ProviderWeb.ChatTimeout), ImageTimeout: config.Duration(value.ProviderWeb.ImageTimeout),
 		VideoTimeout:     config.Duration(value.ProviderWeb.VideoTimeout),
 		MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
@@ -319,6 +343,8 @@ func toDomainConfig(value config.Config) settingsdomain.Config {
 			BaseURL: value.Provider.Web.BaseURL, QuotaTimeout: value.Provider.Web.QuotaTimeout.Value(),
 			StatsigMode: value.Provider.Web.StatsigMode, StatsigManualValue: value.Provider.Web.StatsigManualValue,
 			StatsigSignerURL: value.Provider.Web.StatsigSignerURL,
+			ClearanceMode: value.Provider.Web.ClearanceMode, FlareSolverrURL: value.Provider.Web.FlareSolverrURL,
+			ClearanceTimeout: value.Provider.Web.ClearanceTimeout.Value(), ClearanceRefresh: value.Provider.Web.ClearanceRefresh.Value(),
 			ChatTimeout:      value.Provider.Web.ChatTimeout.Value(), ImageTimeout: value.Provider.Web.ImageTimeout.Value(),
 			VideoTimeout:     value.Provider.Web.VideoTimeout.Value(),
 			MediaConcurrency: value.Provider.Web.MediaConcurrency, AllowNSFW: value.Provider.Web.AllowNSFW,
@@ -391,6 +417,10 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 	} else {
 		next.Provider.Web.StatsigManualValue = ""
 	}
+	if input.ProviderWeb.ClearanceProvided {
+		next.Provider.Web.ClearanceMode = strings.TrimSpace(input.ProviderWeb.ClearanceMode)
+		next.Provider.Web.FlareSolverrURL = strings.TrimSpace(input.ProviderWeb.FlareSolverrURL)
+	}
 	next.Provider.Web.MediaConcurrency = input.ProviderWeb.MediaConcurrency
 	next.Provider.Web.AllowNSFW = input.ProviderWeb.AllowNSFW
 	next.Provider.Console.BaseURL = strings.TrimSpace(input.ProviderConsole.BaseURL)
@@ -429,7 +459,21 @@ func mergeEditable(current config.Config, input EditableConfig) (config.Config, 
 		{"media.cleanupInterval", input.Media.CleanupInterval, func(value config.Duration) { next.Media.CleanupInterval = value }},
 		{"batch.randomDelay", input.Batch.RandomDelay, func(value config.Duration) { next.Batch.RandomDelay = value }},
 	}
-	for _, item := range durations {
+	if input.ProviderWeb.ClearanceProvided {
+			durations = append(durations,
+				struct {
+					path  string
+					value string
+					set   func(config.Duration)
+				}{"providerWeb.clearanceTimeout", input.ProviderWeb.ClearanceTimeout, func(value config.Duration) { next.Provider.Web.ClearanceTimeout = value }},
+				struct {
+					path  string
+					value string
+					set   func(config.Duration)
+				}{"providerWeb.clearanceRefresh", input.ProviderWeb.ClearanceRefresh, func(value config.Duration) { next.Provider.Web.ClearanceRefresh = value }},
+			)
+		}
+		for _, item := range durations {
 		value, err := time.ParseDuration(strings.TrimSpace(item.value))
 		if err != nil {
 			return config.Config{}, fmt.Errorf("%s 必须是有效时长", item.path)
@@ -454,6 +498,8 @@ func toEditable(cfg config.Config) EditableConfig {
 			BaseURL: cfg.Provider.Web.BaseURL, QuotaTimeout: cfg.Provider.Web.QuotaTimeout.String(),
 			StatsigMode: cfg.Provider.Web.StatsigMode, StatsigManualConfigured: strings.TrimSpace(cfg.Provider.Web.StatsigManualValue) != "",
 			StatsigSignerURL: cfg.Provider.Web.StatsigSignerURL,
+				ClearanceMode: cfg.Provider.Web.ClearanceMode, FlareSolverrURL: cfg.Provider.Web.FlareSolverrURL,
+				ClearanceTimeout: cfg.Provider.Web.ClearanceTimeout.String(), ClearanceRefresh: cfg.Provider.Web.ClearanceRefresh.String(),
 			ChatTimeout:      cfg.Provider.Web.ChatTimeout.String(), ImageTimeout: cfg.Provider.Web.ImageTimeout.String(),
 			VideoTimeout:     cfg.Provider.Web.VideoTimeout.String(),
 			MediaConcurrency: cfg.Provider.Web.MediaConcurrency, AllowNSFW: cfg.Provider.Web.AllowNSFW,

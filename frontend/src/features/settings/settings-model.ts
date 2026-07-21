@@ -22,6 +22,15 @@ const consoleChatDuration = durationSchema.refine((value) => {
   return seconds >= 5 && seconds <= 30 * 60;
 });
 
+function validHTTPURL(value: string): boolean {
+  try {
+    const parsed = new URL(value.trim());
+    return (parsed.protocol === "http:" || parsed.protocol === "https:") && parsed.username === "" && parsed.password === "" && parsed.search === "" && parsed.hash === "";
+  } catch {
+    return false;
+  }
+}
+
 function validPublicAPIBaseURL(value: string): boolean {
   const trimmed = value.trim();
   if (trimmed.length === 0) return true;
@@ -56,6 +65,10 @@ export const settingsSchema = z.object({
     statsigManualValue: z.string().trim().max(4096),
     statsigManualConfigured: z.boolean(),
     statsigSignerURL: z.string().trim().max(2048),
+    clearanceMode: z.enum(["manual", "flaresolverr"]),
+    flareSolverrURL: z.string().trim().max(2048),
+    clearanceTimeout: durationSchema.refine((value) => durationSeconds(value) >= 10 && durationSeconds(value) <= 300),
+    clearanceRefresh: durationSchema.refine((value) => durationSeconds(value) >= 60 && durationSeconds(value) <= 86_400),
     quotaTimeout: durationSchema, chatTimeout: durationSchema, imageTimeout: durationSchema, videoTimeout: durationSchema,
     mediaConcurrency: positiveInteger.max(64), allowNSFW: z.boolean(),
     recoveryBackoffBase: durationSchema, recoveryBackoffMax: durationSchema,
@@ -73,6 +86,9 @@ export const settingsSchema = z.object({
       if (!validStatsigSignerURL(value.statsigSignerURL)) {
         context.addIssue({ code: "custom", path: ["statsigSignerURL"], message: "invalid" });
       }
+    }
+    if (value.clearanceMode === "flaresolverr" && !validHTTPURL(value.flareSolverrURL)) {
+      context.addIssue({ code: "custom", path: ["flareSolverrURL"], message: "invalid" });
     }
   }),
   providerConsole: z.object({
@@ -117,6 +133,10 @@ export function toSettingsForm(config: SettingsConfigDTO): SettingsForm {
     providerWeb: {
       ...config.providerWeb,
       statsigManualValue: "",
+      clearanceMode: config.providerWeb.clearanceMode ?? "manual",
+      flareSolverrURL: config.providerWeb.flareSolverrURL ?? "http://flaresolverr:8191",
+      clearanceTimeout: parseDuration(config.providerWeb.clearanceTimeout || "1m"),
+      clearanceRefresh: parseDuration(config.providerWeb.clearanceRefresh || "10m"),
       quotaTimeout: parseDuration(config.providerWeb.quotaTimeout), chatTimeout: parseDuration(config.providerWeb.chatTimeout),
       imageTimeout: parseDuration(config.providerWeb.imageTimeout), videoTimeout: parseDuration(config.providerWeb.videoTimeout),
       recoveryBackoffBase: parseDuration(config.providerWeb.recoveryBackoffBase), recoveryBackoffMax: parseDuration(config.providerWeb.recoveryBackoffMax),
@@ -146,6 +166,8 @@ export function toSettingsDTO(config: SettingsForm): SettingsConfigDTO {
     providerBuild: config.providerBuild,
     providerWeb: {
       ...config.providerWeb,
+      clearanceTimeout: formatDuration(config.providerWeb.clearanceTimeout),
+      clearanceRefresh: formatDuration(config.providerWeb.clearanceRefresh),
       quotaTimeout: formatDuration(config.providerWeb.quotaTimeout), chatTimeout: formatDuration(config.providerWeb.chatTimeout),
       imageTimeout: formatDuration(config.providerWeb.imageTimeout), videoTimeout: formatDuration(config.providerWeb.videoTimeout),
       recoveryBackoffBase: formatDuration(config.providerWeb.recoveryBackoffBase), recoveryBackoffMax: formatDuration(config.providerWeb.recoveryBackoffMax),

@@ -69,6 +69,10 @@ type providerWebConfigDTO struct {
 	StatsigManualValue      string `json:"statsigManualValue,omitempty"`
 	StatsigManualConfigured bool   `json:"statsigManualConfigured"`
 	StatsigSignerURL        string `json:"statsigSignerURL"`
+	ClearanceMode     string `json:"clearanceMode,omitempty"`
+	FlareSolverrURL   string `json:"flareSolverrURL,omitempty"`
+	ClearanceTimeout  string `json:"clearanceTimeout,omitempty"`
+	ClearanceRefresh  string `json:"clearanceRefresh,omitempty"`
 	QuotaTimeout            string `json:"quotaTimeout"`
 	ChatTimeout             string `json:"chatTimeout"`
 	ImageTimeout            string `json:"imageTimeout"`
@@ -162,6 +166,9 @@ func (value settingsConfigDTO) toApplication() settingsapp.EditableConfig {
 			BaseURL: value.ProviderWeb.BaseURL, QuotaTimeout: value.ProviderWeb.QuotaTimeout,
 			StatsigMode: value.ProviderWeb.StatsigMode, StatsigManualValue: value.ProviderWeb.StatsigManualValue,
 			StatsigManualConfigured: value.ProviderWeb.StatsigManualConfigured, StatsigSignerURL: value.ProviderWeb.StatsigSignerURL,
+			ClearanceMode: value.ProviderWeb.ClearanceMode, FlareSolverrURL: value.ProviderWeb.FlareSolverrURL,
+			ClearanceTimeout: value.ProviderWeb.ClearanceTimeout, ClearanceRefresh: value.ProviderWeb.ClearanceRefresh,
+				ClearanceProvided: true,
 			ChatTimeout: value.ProviderWeb.ChatTimeout, ImageTimeout: value.ProviderWeb.ImageTimeout,
 			VideoTimeout:     value.ProviderWeb.VideoTimeout,
 			MediaConcurrency: value.ProviderWeb.MediaConcurrency, AllowNSFW: value.ProviderWeb.AllowNSFW,
@@ -210,6 +217,8 @@ func newSettingsResponse(value settingsapp.Snapshot) settingsResponse {
 				BaseURL: config.ProviderWeb.BaseURL, QuotaTimeout: config.ProviderWeb.QuotaTimeout,
 				StatsigMode: config.ProviderWeb.StatsigMode, StatsigManualConfigured: config.ProviderWeb.StatsigManualConfigured,
 				StatsigSignerURL: config.ProviderWeb.StatsigSignerURL,
+				ClearanceMode: config.ProviderWeb.ClearanceMode, FlareSolverrURL: config.ProviderWeb.FlareSolverrURL,
+				ClearanceTimeout: config.ProviderWeb.ClearanceTimeout, ClearanceRefresh: config.ProviderWeb.ClearanceRefresh,
 				ChatTimeout:      config.ProviderWeb.ChatTimeout, ImageTimeout: config.ProviderWeb.ImageTimeout,
 				VideoTimeout:     config.ProviderWeb.VideoTimeout,
 				MediaConcurrency: config.ProviderWeb.MediaConcurrency, AllowNSFW: config.ProviderWeb.AllowNSFW,
